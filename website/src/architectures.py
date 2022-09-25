@@ -81,7 +81,8 @@ class BPNet(nn.Module):
         if interpretation:
             return (softmax_profile.detach()*profile_shapes).sum(axis=-1).squeeze().mean(axis=-1)
         elif self.pred_total:
-            total_counts = torch.stack([head.forward(bottleneck, bias_raw) for head in self.count_heads], dim=1)
+            # use softplus here to ensure that the output is always positive
+            total_counts = F.softplus(torch.stack([head.forward(bottleneck, bias_raw) for head in self.count_heads], dim=1))
             return (softmax_profile, total_counts)
         else:
             return F.softmax(profile_shapes, dim=-1)

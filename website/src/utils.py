@@ -108,7 +108,7 @@ def dummy_shape_predictions(dataset, plot_mean=False):
 def dummy_total_counts_predictions(dataset):
     from torch.nn.functional import mse_loss
     mean_prediction = dataset.tf_counts.sum(axis=-1).mean(axis=0)
-    mean_loss = ((torch.log(1 + torch.from_numpy(mean_prediction).repeat(len(dataset), 1, 1)) - torch.log(1 + torch.from_numpy(dataset.tf_counts.sum(axis=-1))))**2).sum()
+    mean_loss = ((torch.log(1 + torch.from_numpy(mean_prediction).repeat(len(dataset), 1, 1)) - torch.log(1 + torch.from_numpy(dataset.tf_counts.sum(axis=-1))))**2).mean()
 
     perfect_prediction = dataset.tf_counts.sum(axis=-1)
     perfect_loss = ((torch.log(1 + torch.from_numpy(perfect_prediction)) - torch.log(1 + torch.from_numpy(dataset.tf_counts.sum(axis=-1))))**2).mean()

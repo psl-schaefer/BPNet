@@ -11,7 +11,6 @@ format:
     number-sections: true
     code-tools:
       source: repo
-
 ---
 
 # Train Parameters
@@ -19,7 +18,7 @@ format:
 ```{python}
 TF_LIST = ["Nanog", "Klf4", "Oct4", "Sox2"]
 #TF_LIST = ["Nanog"]
-INPUT_DIR = "/home/philipp/AML_Final_Project/output_correct/"
+INPUT_DIR = "/home/philipp/BPNet/input/"
 BATCH_SIZE = 64
 MAX_EPOCHS = 100  
 EARLY_STOP_PATIENCE = 4
@@ -41,7 +40,11 @@ from torch.utils.data import Dataset, DataLoader
 from src.architectures import BPNet
 from src.utils import ChIP_Nexus_Dataset, dummy_shape_predictions, dummy_total_counts_predictions
 from src.loss import neg_log_multinomial
+from src.metrics import permute_array, bin_max_values, bin_counts_amb, binary_labels_from_counts, compute_auprc_bins
+color_pal = {"Oct4": "#CD5C5C", "Sox2": "#849EEB", "Nanog": "#FFE03F", "Klf4": "#92C592", "patchcap": "#827F81"}
 import pandas as pd
+import sklearn.metrics as skm
+import seaborn as sns
 ```
 
 ```{python}
@@ -61,7 +64,7 @@ train_dataset
 Determine $\lambda$ hyperparameter to weight between the negative multinomial log-likelihood for the shape prediction and the mean squared error for the total count prediction.
 
 ```{python}
-lambda_param = (np.median(train_dataset.tf_counts.sum(axis=-1), axis=0)).mean() / 10
+lambda_param = (np.median(train_dataset.tf_counts.sum(axis=-1), axis=0)).mean() / 2
 lambda_param
 ```
 
@@ -84,6 +87,22 @@ tune_dataset
 dummy_shape_predictions(tune_dataset)
 ```
 
+```{python}
+test_dataset = ChIP_Nexus_Dataset(set_name="test", 
+                                  input_dir=INPUT_DIR, 
+                                  TF_list=TF_LIST)
+test_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
+test_dataset
+```
+
+```{python}
+dummy_shape_predictions(test_dataset)
+```
+
+```{python}
+dummy_total_counts_predictions(test_dataset)
+```
+
 # Shape Prediction
 
 ## Train Loop
@@ -99,6 +118,18 @@ train_loss, test_loss = [], []
 patience_counter = 0
 
 for epoch in range(MAX_EPOCHS):
+
+  # test
+  test_loss_epoch = []
+  with torch.no_grad():
+      for one_hot, tf_counts, ctrl_counts, ctrl_smooth in tune_loader:
+          one_hot, tf_counts, ctrl_counts, ctrl_smooth = one_hot.to(device), tf_counts.to(device), ctrl_counts.to(device), ctrl_smooth.to(device)
+          profile_pred = model.forward(sequence=one_hot, bias_raw=ctrl_counts, bias_smooth=ctrl_smooth)
+          loss = neg_log_multinomial(k_obs=tf_counts, p_pred=profile_pred, device=device)
+          test_loss_epoch.append(loss.item())
+      test_loss.append(sum(test_loss_epoch)/len(test_loss_epoch))
+
+  # train
   model.train()
   train_loss_epoch = []
   for one_hot, tf_counts, ctrl_counts, ctrl_smooth in train_loader:
@@ -110,24 +141,6 @@ for epoch in range(MAX_EPOCHS):
     loss.backward()
     optimizer.step()
   train_loss.append(sum(train_loss_epoch)/len(train_loss_epoch))
-
-  # evaluation part
-  test_loss_epoch = []
-  with torch.no_grad():
-      for one_hot, tf_counts, ctrl_counts, ctrl_smooth in tune_loader:
-          one_hot, tf_counts, ctrl_counts, ctrl_smooth = one_hot.to(device), tf_counts.to(device), ctrl_counts.to(device), ctrl_smooth.to(device)
-          profile_pred = model.forward(sequence=one_hot, bias_raw=ctrl_counts, bias_smooth=ctrl_smooth)
-          loss = neg_log_multinomial(k_obs=tf_counts, p_pred=profile_pred, device=device)
-          test_loss_epoch.append(loss.item())
-      test_loss.append(sum(test_loss_epoch)/len(test_loss_epoch))
-          
-  if plot_while_train:
-    plt.plot(np.arange(epoch+1), np.array(train_loss), label="train")
-    plt.plot(np.arange(epoch+1), np.array(test_loss), label="test")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.legend()
-    plt.show()
 
   if test_loss[-1] > np.array(test_loss).min():
     patience_counter += 1
@@ -172,7 +185,7 @@ model = torch.load("/home/philipp/BPNet/trained_models/all_tfs_shape_model.pt")
 Plotting the real counts and the predictions for the first batch from the tune dataset.
 
 ```{python}
-tune_loader=DataLoader(tune_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
+tune_loader=DataLoader(tune_dataset, batch_size=10, shuffle=False, num_workers=0, pin_memory=True)
 one_hot, tf_counts, ctrl_counts, ctrl_smooth = next(tune_loader.__iter__())
 one_hot, tf_counts, ctrl_counts, ctrl_smooth = one_hot.to(device), tf_counts.to(device), ctrl_counts.to(device), ctrl_smooth.to(device)
 profile_pred = model.forward(sequence=one_hot, bias_raw=ctrl_counts, bias_smooth=ctrl_smooth).to("cpu").detach().numpy()
@@ -181,7 +194,7 @@ scaled_pred = profile_pred * tf_counts.sum(axis=-1)[:,:,:,None]
 lw = 0.8
 ```
 
-### Nanog
+#### Nanog
 
 ```{python}
 tf = 0
@@ -199,7 +212,7 @@ for i in range(profile_pred.shape[0]):
   plt.show()
 ```
   
-### Klf4
+#### Klf4
 
 ```{python}
 tf = 1
@@ -217,7 +230,7 @@ for i in range(profile_pred.shape[0]):
   plt.show()
 ```
 
-### Oct4
+#### Oct4
 
 ```{python}
 tf = 2
@@ -235,7 +248,7 @@ for i in range(profile_pred.shape[0]):
   plt.show()
 ```
 
-### Sox2
+#### Sox2
 
 ```{python}
 tf = 3
@@ -253,9 +266,85 @@ for i in range(profile_pred.shape[0]):
   plt.show()
 ```
 
+### Precision and Recall
+
 ```{python}
-# clean up
-del model
+test_pred = torch.zeros(test_dataset.tf_counts.shape, dtype=torch.float32).to(device)
+with torch.no_grad():
+    for batch_idx, data in enumerate(test_dataloader):
+        #print(batch_idx, batch_idx + 100)#, data)
+        one_hot, tf_counts, ctrl_counts, ctrl_smooth = data
+        one_hot, tf_counts, ctrl_counts, ctrl_smooth = one_hot.to(device), tf_counts.to(device), ctrl_counts.to(device), ctrl_smooth.to(device)
+        profile_pred = model.forward(sequence=one_hot, bias_raw=ctrl_counts, bias_smooth=ctrl_smooth)
+        #print(profile_pred.shape)
+        start = batch_idx*BATCH_SIZE
+        end = (batch_idx+1)*BATCH_SIZE if (batch_idx+1)*BATCH_SIZE < test_dataset.tf_counts.shape[0] else test_dataset.tf_counts.shape[0]
+        test_pred[start:end, :, :, :] = profile_pred
+```
+
+```{python}
+def plot_prc(test_dataset, test_pred, tf_index, tf_name, plot = True):
+    true_counts = test_dataset.tf_counts.copy()
+    #subset for one tf
+    tf_counts = true_counts[:, tf_index, :, :]
+    test_pred = test_pred.cpu().numpy().copy()
+    assert np.allclose(test_pred.sum(axis=-1), 1)
+    # subset for one tf
+    tf_pred = test_pred[:, tf_index, :, :]
+    binary_labels, pred_subset, random = binary_labels_from_counts(tf_counts, tf_pred, verbose=False)
+    precision, recall, thresholds = skm.precision_recall_curve(binary_labels, pred_subset)
+    if plot:
+        plt.plot(precision, recall,  label=f"{tf}")
+        plt.title(f"Precision-Recall Curve: {tf_name}")
+        plt.xlabel("recall")
+        plt.ylabel("precision")
+    else:
+        return precision, recall, thresholds
+```
+
+```{python}
+for i, tf in enumerate(TF_LIST):
+    plot_prc(test_dataset, test_pred, i, tf, plot=True)
+    plt.legend()
+```
+
+```{python}
+df = pd.DataFrame(columns=["TF", "precision", "recall"])
+for i, tf in enumerate(TF_LIST):
+    precision, recall, thresholds = plot_prc(test_dataset, test_pred, i, tf, plot=False)
+    tmp_df = pd.DataFrame({
+      "TF": tf,
+      "precision": precision,
+      "recall": recall,
+    })
+    df = df.append(tmp_df)
+df.to_csv("/home/philipp/BPNet/out/pr_curve_all_tfs_shape_model.csv", index=False)
+del df, tmp_df
+```
+
+```{python}
+# loop over all four TFs:
+true_counts = test_dataset.tf_counts.copy()
+all_pred = test_pred.cpu().numpy().copy()
+patchcap = test_dataset.ctrl_counts.copy()
+assert np.allclose(all_pred.sum(axis=-1), 1)
+
+for tf_index, tf in enumerate(TF_LIST):
+    patchcap_cp = patchcap.copy()
+    # subset for one tf
+    pred = all_pred[:, tf_index, :, :]
+    counts = true_counts[:, tf_index, :, :]
+    # compute auPRC fro all bins
+    all = compute_auprc_bins(counts, pred, patchcap_cp, verbose=False)
+    df = pd.DataFrame(all)
+    df.to_csv(f"/home/philipp/BPNet/out/binsizes_auprc_{tf}_shape_model.csv")
+    sns.scatterplot(x=df["binsize"], y=df["auprc"], label="BPNet")
+    sns.scatterplot(x=df["binsize"], y=df["random_auprc"], label="random profile")
+    sns.scatterplot(x=df["binsize"], y=df["average_auprc"], label="average profile")
+    sns.scatterplot(x=df["binsize"], y=df["patchcap_auprc"], label="PATCH-CAP")
+    plt.title(f"{tf}")
+    plt.legend()
+    plt.show()
 ```
 
 # Shape & Total Counts Prediction
@@ -275,6 +364,26 @@ test_shape_loss, test_count_loss, test_loss = [], [], []
 patience_counter = 0
 
 for epoch in range(MAX_EPOCHS):
+
+  # test
+  test_shape_loss_epoch, test_count_loss_epoch, test_loss_epoch = [], [], []
+  with torch.no_grad():
+    for one_hot, tf_counts, ctrl_counts, ctrl_smooth in tune_loader:
+      one_hot, tf_counts, ctrl_counts, ctrl_smooth = one_hot.to(device), tf_counts.to(device), ctrl_counts.to(device), ctrl_smooth.to(device)
+      shape_pred, count_pred = model.forward(sequence=one_hot, bias_raw=ctrl_counts, bias_smooth=ctrl_smooth)
+      shape_loss = neg_log_multinomial(k_obs=tf_counts, p_pred=shape_pred, device=device)
+      if count_pred.min() < 0:
+        break
+      count_loss = ((torch.log(1 + count_pred) - torch.log(1 + tf_counts.sum(axis=-1)))**2).mean()
+      loss = shape_loss + lambda_param * count_loss
+      test_shape_loss_epoch.append(shape_loss.item())
+      test_count_loss_epoch.append(count_loss.item())
+      test_loss_epoch.append(loss.item())
+    test_shape_loss.append(sum(test_shape_loss_epoch)/len(test_shape_loss_epoch))
+    test_count_loss.append(sum(test_count_loss_epoch)/len(test_count_loss_epoch))
+    test_loss.append(sum(test_loss_epoch)/len(test_loss_epoch))
+
+  # train
   model.train()
   train_shape_loss_epoch, train_count_loss_epoch, train_loss_epoch = [], [], []
   for one_hot, tf_counts, ctrl_counts, ctrl_smooth in train_loader:
@@ -293,52 +402,11 @@ for epoch in range(MAX_EPOCHS):
   train_count_loss.append(sum(train_count_loss_epoch)/len(train_count_loss_epoch))
   train_loss.append(sum(train_loss_epoch)/len(train_loss_epoch))
 
-  # evaluation part
-  test_shape_loss_epoch, test_count_loss_epoch, test_loss_epoch = [], [], []
-  with torch.no_grad():
-    for one_hot, tf_counts, ctrl_counts, ctrl_smooth in tune_loader:
-      one_hot, tf_counts, ctrl_counts, ctrl_smooth = one_hot.to(device), tf_counts.to(device), ctrl_counts.to(device), ctrl_smooth.to(device)
-      shape_pred, count_pred = model.forward(sequence=one_hot, bias_raw=ctrl_counts, bias_smooth=ctrl_smooth)
-      shape_loss = neg_log_multinomial(k_obs=tf_counts, p_pred=shape_pred, device=device)
-      count_loss = ((torch.log(1 + count_pred) - torch.log(1 + tf_counts.sum(axis=-1)))**2).mean()
-      loss = shape_loss + lambda_param * count_loss
-      test_shape_loss_epoch.append(shape_loss.item())
-      test_count_loss_epoch.append(count_loss.item())
-      test_loss_epoch.append(loss.item())
-    test_shape_loss.append(sum(test_shape_loss_epoch)/len(test_shape_loss_epoch))
-    test_count_loss.append(sum(test_count_loss_epoch)/len(test_count_loss_epoch))
-    test_loss.append(sum(test_loss_epoch)/len(test_loss_epoch))
-          
-  if plot_while_train:
-    fig, axis = plt.subplots(1, 3, figsize=(12, 3))
-    axis[0].plot(np.arange(1, epoch+2), np.array(train_shape_loss), label="train")
-    axis[0].plot(np.arange(1, epoch+2), np.array(test_shape_loss), label="test")
-    axis[0].set_xlabel("Epoch")
-    axis[0].set_ylabel("Loss")
-    axis[0].set_title("Shape Loss")
-    
-    axis[1].plot(np.arange(1, epoch+2), np.array(train_count_loss), label="train")
-    axis[1].plot(np.arange(1, epoch+2), np.array(test_count_loss), label="test")
-    axis[1].set_xlabel("Epoch")
-    axis[1].set_ylabel("Loss")
-    axis[1].set_title("Count Loss")
-
-    axis[2].plot(np.arange(1, epoch+2), np.array(train_loss), label="train")
-    axis[2].plot(np.arange(1, epoch+2), np.array(test_loss), label="test")
-    axis[2].set_xlabel("Epoch")
-    axis[2].set_ylabel("Loss")
-    axis[2].set_title("Combined Loss")
-
-    plt.legend()
-    plt.show()
-
   if test_loss[-1] > np.array(test_loss).min():
     patience_counter += 1
   else:
     patience_counter = 0
     best_state_dict = model.state_dict()
-
-  print(f"Epoch: {epoch} | Patience Counter: {patience_counter}")
 
   if patience_counter == EARLY_STOP_PATIENCE:
     break
@@ -392,7 +460,7 @@ model = torch.load("/home/philipp/BPNet/trained_models/all_tfs_model.pt")
 Plotting the real counts and the predictions for the first batch from the tune dataset.
 
 ```{python}
-tune_loader=DataLoader(tune_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
+tune_loader=DataLoader(tune_dataset, batch_size=10, shuffle=False, num_workers=0, pin_memory=True)
 one_hot, tf_counts, ctrl_counts, ctrl_smooth = next(tune_loader.__iter__())
 one_hot, tf_counts, ctrl_counts, ctrl_smooth = one_hot.to(device), tf_counts.to(device), ctrl_counts.to(device), ctrl_smooth.to(device)
 profile_pred, _ = model.forward(sequence=one_hot, bias_raw=ctrl_counts, bias_smooth=ctrl_smooth)
@@ -402,7 +470,29 @@ scaled_pred = profile_pred * tf_counts.sum(axis=-1)[:,:,:,None]
 lw = 0.8
 ```
 
-### Nanog
+#### Specific Sequence
+
+```{python}
+tmp_df = test_dataset.region_info.copy().reset_index()
+idx = tmp_df.loc[(tmp_df.seqnames=="chr1") & (tmp_df.start > 180924752-1000) & (tmp_df.end < 180925152+1000) & (tmp_df.TF == "Sox2")].index.to_numpy()[0]
+print(tmp_df.iloc[idx])
+
+shape_pred, count_pred = model.forward(torch.from_numpy(test_dataset.one_hot_seqs[idx:idx+1, ]).to(device), torch.from_numpy(test_dataset.ctrl_counts[idx:idx+1, ]).to(device), torch.from_numpy(test_dataset.ctrl_counts_smooth[idx:idx+1, ]).to(device))
+
+shape_pred = shape_pred.cpu().detach().numpy()
+
+df = pd.DataFrame(columns=["position", "TF", "strand", "kind", "value"])
+
+for data, kind in zip([test_dataset.tf_counts[idx], shape_pred[0]], ["counts", "prediction"]):
+  for i, tf in enumerate(TF_LIST):
+    for j, strand in enumerate(["pos", "neg"]):
+      tmp_df = pd.DataFrame({"position": np.arange(1000), "TF": tf, "strand": strand, "kind": kind, "value": data[i, j]})
+      df = df.append(tmp_df)
+df.to_csv("/home/philipp/BPNet/out/example_shape_prediction.csv")
+```
+
+
+#### Nanog
 
 ```{python}
 tf = 0
@@ -420,7 +510,7 @@ for i in range(profile_pred.shape[0]):
   plt.show()
 ```
   
-### Klf4
+#### Klf4
 
 ```{python}
 tf = 1
@@ -438,7 +528,7 @@ for i in range(profile_pred.shape[0]):
   plt.show()
 ```
 
-### Oct4
+#### Oct4
 
 ```{python}
 tf = 2
@@ -456,7 +546,7 @@ for i in range(profile_pred.shape[0]):
   plt.show()
 ```
 
-### Sox2
+#### Sox2
 
 ```{python}
 tf = 3
@@ -472,4 +562,105 @@ for i in range(profile_pred.shape[0]):
   axis[2].plot(-scaled_pred[i, tf, 1], color="blue", linewidth=lw)
   axis[0].legend()
   plt.show()
+```
+
+### Precision and Recall
+
+```{python}
+test_pred = torch.zeros(test_dataset.tf_counts.shape, dtype=torch.float32).to(device)
+test_count_pred = torch.zeros(test_dataset.tf_counts.shape[0:3], dtype=torch.float32).to(device)
+with torch.no_grad():
+    for batch_idx, data in enumerate(test_dataloader):
+        #print(batch_idx, batch_idx + 100)#, data)
+        one_hot, tf_counts, ctrl_counts, ctrl_smooth = data
+        one_hot, tf_counts, ctrl_counts, ctrl_smooth = one_hot.to(device), tf_counts.to(device), ctrl_counts.to(device), ctrl_smooth.to(device)
+        profile_pred, count_pred = model.forward(sequence=one_hot, bias_raw=ctrl_counts, bias_smooth=ctrl_smooth)
+        #print(profile_pred.shape)
+        start = batch_idx*BATCH_SIZE
+        end = (batch_idx+1)*BATCH_SIZE if (batch_idx+1)*BATCH_SIZE < test_dataset.tf_counts.shape[0] else test_dataset.tf_counts.shape[0]
+        test_pred[start:end] = profile_pred
+        test_count_pred[start:end] = count_pred
+```
+
+```{python}
+def plot_prc(test_dataset, test_pred, tf_index, tf_name, plot = True):
+    true_counts = test_dataset.tf_counts.copy()
+    #subset for one tf
+    tf_counts = true_counts[:, tf_index, :, :]
+    test_pred = test_pred.cpu().numpy().copy()
+    assert np.allclose(test_pred.sum(axis=-1), 1)
+    # subset for one tf
+    tf_pred = test_pred[:, tf_index, :, :]
+    binary_labels, pred_subset, random = binary_labels_from_counts(tf_counts, tf_pred, verbose=False)
+    precision, recall, thresholds = skm.precision_recall_curve(binary_labels, pred_subset)
+    if plot:
+        plt.plot(recall, precision,  label=f"{tf}")
+        plt.title(f"Precision-Recall Curve: {tf_name}")
+        plt.xlabel("recall")
+        plt.ylabel("precision")
+    else:
+        return precision, recall, thresholds
+```
+
+```{python}
+for i, tf in enumerate(TF_LIST):
+    plot_prc(test_dataset, test_pred, i, tf, plot=True)
+    plt.legend()
+```
+
+```{python}
+df = pd.DataFrame(columns=["TF", "precision", "recall"])
+for i, tf in enumerate(TF_LIST):
+    precision, recall, thresholds = plot_prc(test_dataset, test_pred, i, tf, plot=False)
+    tmp_df = pd.DataFrame({
+      "TF": tf,
+      "precision": precision,
+      "recall": recall,
+    })
+    df = df.append(tmp_df)
+df.to_csv("/home/philipp/BPNet/out/pr_curve_all_tfs_count_model.csv", index=False)
+del df, tmp_df
+```
+
+```{python}
+# loop over all four TFs:
+true_counts = test_dataset.tf_counts.copy()
+all_pred = test_pred.cpu().numpy().copy()
+patchcap = test_dataset.ctrl_counts.copy()
+assert np.allclose(all_pred.sum(axis=-1), 1)
+
+for tf_index, tf in enumerate(TF_LIST):
+    patchcap_cp = patchcap.copy()
+    # subset for one tf
+    pred = all_pred[:, tf_index, :, :]
+    counts = true_counts[:, tf_index, :, :]
+    # compute auPRC fro all bins
+    all = compute_auprc_bins(counts, pred, patchcap_cp, verbose=False)
+    df = pd.DataFrame(all)
+    df.to_csv(f"/home/philipp/BPNet/out/binsizes_auprc_{tf}_count_model.csv")
+    sns.scatterplot(x=df["binsize"], y=df["auprc"], label="BPNet")
+    sns.scatterplot(x=df["binsize"], y=df["random_auprc"], label="random profile")
+    sns.scatterplot(x=df["binsize"], y=df["average_auprc"], label="average profile")
+    sns.scatterplot(x=df["binsize"], y=df["patchcap_auprc"], label="PATCH-CAP")
+    plt.title(f"{tf}")
+    plt.legend()
+    plt.show()
+```
+
+### MSE and R2
+
+```{python}
+true_total_counts = test_dataset.tf_counts.sum(axis=-1).copy()
+pred_total_counts = test_count_pred.cpu().detach().numpy()
+tf_means = true_total_counts.mean(axis=0)
+
+df = pd.DataFrame(columns=["TF", "mse", "tss", "rss", "r2"])
+for i, tf in enumerate(TF_LIST):
+  mse = ((np.log1p(true_total_counts[:, i]) - np.log1p(pred_total_counts[:, i]))**2).mean()
+  tss = ((true_total_counts[:, i] - tf_means[None, i])**2).sum()
+  rss = ((true_total_counts[:, i] - pred_total_counts[:, i])**2).sum()
+  r2 = 1 - rss/tss
+  tmp_df = pd.DataFrame({"TF": tf, "mse": mse, "tss": tss, "rss": rss, "r2": r2}, index=[0])
+  df = pd.concat([df, tmp_df], ignore_index=True, axis=0)
+df.to_csv("/home/philipp/BPNet/out/count_stats.csv", index=False)
 ```

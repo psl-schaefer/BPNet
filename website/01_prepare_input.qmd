@@ -77,10 +77,10 @@ chrom_list
 ## Colors
 
 ```{r}
-colors = c("Oct4" = "#CD5C5C",
-           "Sox2" = "#849EEB",
+colors = c("Klf4" = "#92C592",
            "Nanog" = "#FFE03F",
-           "Klf4" = "#92C592",
+           "Oct4" = "#CD5C5C",
+           "Sox2" = "#849EEB",
            "patchcap" = "#827F81")
 ```
 
@@ -182,7 +182,7 @@ p <- peak_infos %>%
   labs(x="Log2 qValue", y="Density", color="TF") +
   scale_color_manual(values=colors) +
   theme_bw()
-ggsave(filename = paste0(output_dir, "figures/macs2_scores_per_tf.pdf"), 
+ggsave(filename = "/home/philipp/BPNet/out/figures/macs2_scores_per_tf.pdf", 
        plot = p, width = 4, height = 4)
 p +
   ggdark::dark_theme_linedraw()
@@ -198,7 +198,7 @@ p <- peak_infos %>%
   labs(x="Number of Peaks", y="TF") +
   theme_bw() +
   scale_fill_manual(values=colors)
-ggsave(filename = paste0(output_dir, "figures/n_peaks_per_tf.pdf"), 
+ggsave(filename = "/home/philipp/BPNet/out/figures/n_peaks_per_tf.pdf", 
        plot = p, width = 4, height = 4)
 p +
   ggdark::dark_theme_linedraw()
@@ -488,15 +488,16 @@ p <- purrr::map_dfr(TFs, function(tf){
   pivot_longer(cols=c(minus, plus)) %>%
   dplyr::mutate(TF = factor(TF, levels=names(colors))) %>%
   ggplot() +
-  geom_line(aes(x=position, y=value, color=TF), size=0.2) +
+  geom_line(aes(x=position, y=value, color=TF, alpha=name), size=0.2) +
   facet_wrap(~TF, ncol=1, scales="free_y") +
   labs(x="Relative Position [bp]", y="Counts", color="Strand", 
        title=test_instance["Region"]) +
   #scale_color_manual(values=c("minus"="darkred", "plus"="forestgreen")) +
   scale_color_manual(values=colors) +
+  scale_alpha_manual(values=c("plus" = 1, "minus" = 1)) +
   theme_bw() +
   theme(plot.title = element_text(size=10, hjust=0.5), strip.background = element_rect(fill=NA))
-ggsave(filename = paste0(output_dir, "figures/example_high_q.pdf"), 
+ggsave(filename = "/home/philipp/BPNet/out/figures/example_high_q.pdf", 
        plot = p, width = 4, height = 8)
 p + 
   ggdark::dark_theme_linedraw()
@@ -565,15 +566,16 @@ p <- purrr::map_dfr(TFs, function(tf){
   pivot_longer(cols=c(minus, plus)) %>%
   dplyr::mutate(TF = factor(TF, levels=names(colors))) %>%
   ggplot() +
-  geom_line(aes(x=position, y=value, color=TF), size=0.2) +
+  geom_line(aes(x=position, y=value, color=TF, alpha=name), size=0.2) +
   facet_wrap(~TF, ncol=1, scales="free_y") +
   labs(x="Relative Position [bp]", y="Counts", color="Strand", 
        title=test_instance["Region"]) +
   #scale_color_manual(values=c("minus"="darkred", "plus"="forestgreen")) +
   scale_color_manual(values=colors) +
+  scale_alpha_manual(values=c("plus" = 1, "minus" = 1)) +
   theme_bw() +
   theme(plot.title = element_text(size=10, hjust=0.5), strip.background = element_rect(fill=NA))
-ggsave(filename = paste0(output_dir, "figures/example_low_q.pdf"), 
+ggsave(filename = "/home/philipp/BPNet/out/figures/example_low_q.pdf", 
        plot = p, width = 4, height = 8)
 p + 
   ggdark::dark_theme_linedraw()
