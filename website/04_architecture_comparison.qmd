@@ -1,0 +1,419 @@
+---
+title: "Training and Metrics"
+jupyter: newtorch
+execute:
+  freeze: auto
+format:
+  html:
+    html-math-method: mathjax
+    theme: darkly
+    toc: true
+    number-sections: true
+    code-tools:
+      source: repo
+---
+
+# Train Parameters
+
+```{python}
+TF_LIST = ["Nanog", "Klf4", "Oct4", "Sox2"]
+INPUT_DIR = "/home/philipp/BPNet/input/"
+BATCH_SIZE = 64
+ALPHA = 10
+MAX_EPOCHS = 100  
+EARLY_STOP_PATIENCE = 4
+RESTORE_BEST_WEIGHTS = True
+plot_while_train = False
+retrain_conv_layers = False
+retrain_channel = False
+retrain_kern_size = True
+```
+
+# Libraries
+
+```{python}
+import matplotlib.pyplot as plt
+import numpy as np
+plt.style.use('dark_background')
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from src.architectures import BPNet
+from src.utils import ChIP_Nexus_Dataset, dummy_shape_predictions, dummy_total_counts_predictions
+from src.loss import neg_log_multinomial
+from src.metrics import permute_array, bin_max_values, bin_counts_amb, binary_labels_from_counts, compute_auprc_bins
+color_pal = {"Oct4": "#CD5C5C", "Sox2": "#849EEB", "Nanog": "#FFE03F", "Klf4": "#92C592", "patchcap": "#827F81"}
+import sklearn.metrics as skm
+import pandas as pd
+import seaborn as sns
+```
+
+```{python}
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Using {device} device")
+```
+
+# Data
+
+```{python}
+train_dataset = ChIP_Nexus_Dataset(set_name="train", 
+                                   input_dir=INPUT_DIR, 
+                                   TF_list=TF_LIST)
+train_dataset
+```
+
+Determine $\lambda$ hyperparameter
+
+```{python}
+lambda_param = (np.median(train_dataset.tf_counts.sum(axis=-1), axis=0)).mean() / 10
+lambda_param
+```
+
+```{python}
+dummy_shape_predictions(train_dataset)
+```
+
+```{python}
+dummy_total_counts_predictions(train_dataset)
+```
+
+```{python}
+tune_dataset = ChIP_Nexus_Dataset(set_name="tune", 
+                                  input_dir=INPUT_DIR, 
+                                  TF_list=TF_LIST)
+tune_dataset
+```
+
+```{python}
+dummy_shape_predictions(tune_dataset)
+```
+
+# Different Number of Dilated Convolutational Layers
+
+## Training (Only Shape Prediction)
+
+```{python}
+n_layers_list = np.arange(1,16)
+
+if retrain_conv_layers:
+  for n_layers in n_layers_list:
+    model = BPNet(n_dil_layers=n_layers, TF_list=TF_LIST, pred_total=False, bias_track=True).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=4*1e-4)
+
+    train_loader=DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=True)
+    tune_loader=DataLoader(tune_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
+
+    train_loss, test_loss = [], []
+    patience_counter = 0
+
+    for epoch in range(MAX_EPOCHS):
+      model.train()
+      train_loss_epoch = []
+      for one_hot, tf_counts, ctrl_counts, ctrl_smooth in train_loader:
+        one_hot, tf_counts, ctrl_counts, ctrl_smooth = one_hot.to(device), tf_counts.to(device), ctrl_counts.to(device), ctrl_smooth.to(device)
+        optimizer.zero_grad()
+        profile_pred = model.forward(sequence=one_hot, bias_raw=ctrl_counts, bias_smooth=ctrl_smooth)
+        loss = neg_log_multinomial(k_obs=tf_counts, p_pred=profile_pred, device=device)
+        train_loss_epoch.append(loss.item())
+        loss.backward()
+        optimizer.step()
+      train_loss.append(sum(train_loss_epoch)/len(train_loss_epoch))
+
+      # evaluation part
+      test_loss_epoch = []
+      with torch.no_grad():
+          for one_hot, tf_counts, ctrl_counts, ctrl_smooth in tune_loader:
+              one_hot, tf_counts, ctrl_counts, ctrl_smooth = one_hot.to(device), tf_counts.to(device), ctrl_counts.to(device), ctrl_smooth.to(device)
+              profile_pred = model.forward(sequence=one_hot, bias_raw=ctrl_counts, bias_smooth=ctrl_smooth)
+              loss = neg_log_multinomial(k_obs=tf_counts, p_pred=profile_pred, device=device)
+              test_loss_epoch.append(loss.item())
+          test_loss.append(sum(test_loss_epoch)/len(test_loss_epoch))
+
+      if test_loss[-1] > np.array(test_loss).min():
+        patience_counter += 1
+      else:
+        patience_counter = 0
+        best_state_dict = model.state_dict()
+
+      if patience_counter == EARLY_STOP_PATIENCE:
+        break
+    
+    if RESTORE_BEST_WEIGHTS:
+      model.load_state_dict(best_state_dict)
+
+    # plot train and test loss
+    plt.plot(np.arange(epoch+1), np.array(train_loss), label="train")
+    plt.plot(np.arange(epoch+1), np.array(test_loss), label="test")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.show()
+
+    # save the model
+    torch.save(obj=model, f=f"/home/philipp/BPNet/trained_models/{n_layers}_dil_layers_model.pt")
+```
+
+## Evaluation
+
+```{python}
+test_dataset = ChIP_Nexus_Dataset(set_name="test", 
+                                  input_dir=INPUT_DIR, 
+                                  TF_list=TF_LIST)
+test_dataset
+```
+
+
+```{python}
+save_scores = []
+test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
+true_counts = test_dataset.tf_counts.copy()
+for n in n_layers_list:
+  model = torch.load(f"/home/philipp/BPNet/trained_models/{n}_dil_layers_model.pt")
+  # make predictions
+  pred = torch.zeros(test_dataset.tf_counts.shape, dtype=torch.float32).to(device)
+  with torch.no_grad():
+      for batch_idx, data in enumerate(test_dataloader):
+          one_hot, tf_counts, ctrl_counts, ctrl_smooth = data
+          one_hot, tf_counts, ctrl_counts, ctrl_smooth = one_hot.to(device), tf_counts.to(device), ctrl_counts.to(device), ctrl_smooth.to(device)
+          profile_pred = model.forward(sequence=one_hot, bias_raw=ctrl_counts, bias_smooth=ctrl_smooth)
+          pred[batch_idx, :, :, :] = profile_pred
+  all_pred = pred.cpu().numpy().copy()
+  assert np.allclose(all_pred.sum(axis=-1), 1)
+          
+  for i, tf in enumerate(TF_LIST): # loop over the four TFs
+      print(f"TF: {tf}")
+      pred_tf = all_pred[:, i, :, :]
+      counts_tf = true_counts[:, i, :, :]
+      labels, predictions, random = binary_labels_from_counts(counts_tf, pred_tf)
+      auprc_score = skm.average_precision_score(labels, predictions)
+      save_scores.append({"tf": tf,
+                          "n_layers":n,
+                          "auprc": auprc_score})
+```
+
+```{python}
+df = pd.DataFrame(save_scores)
+df.to_csv("/home/philipp/BPNet/out/dil_layers_auprc.csv")
+sns.scatterplot(data=df, x="n_layers", y="auprc", hue="tf", palette=color_pal)
+plt.show()
+```
+
+# Different Number of Dilated Convolutational Layers
+
+## Training (Only Shape Prediction)
+
+```{python}
+n_channel_list = np.array([2, 4, 8, 16, 32, 64, 128, 256])
+
+if retrain_channel:
+  for n_channel in n_channel_list:
+    model = BPNet(n_dil_layers=9, TF_list=TF_LIST, pred_total=False, bias_track=True, conv_channels=n_channel).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=4*1e-4)
+
+    train_loader=DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=True)
+    tune_loader=DataLoader(tune_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
+
+    train_loss, test_loss = [], []
+    patience_counter = 0
+
+    for epoch in range(MAX_EPOCHS):
+      model.train()
+      train_loss_epoch = []
+      for one_hot, tf_counts, ctrl_counts, ctrl_smooth in train_loader:
+        one_hot, tf_counts, ctrl_counts, ctrl_smooth = one_hot.to(device), tf_counts.to(device), ctrl_counts.to(device), ctrl_smooth.to(device)
+        optimizer.zero_grad()
+        profile_pred = model.forward(sequence=one_hot, bias_raw=ctrl_counts, bias_smooth=ctrl_smooth)
+        loss = neg_log_multinomial(k_obs=tf_counts, p_pred=profile_pred, device=device)
+        train_loss_epoch.append(loss.item())
+        loss.backward()
+        optimizer.step()
+      train_loss.append(sum(train_loss_epoch)/len(train_loss_epoch))
+
+      # evaluation part
+      test_loss_epoch = []
+      with torch.no_grad():
+          for one_hot, tf_counts, ctrl_counts, ctrl_smooth in tune_loader:
+              one_hot, tf_counts, ctrl_counts, ctrl_smooth = one_hot.to(device), tf_counts.to(device), ctrl_counts.to(device), ctrl_smooth.to(device)
+              profile_pred = model.forward(sequence=one_hot, bias_raw=ctrl_counts, bias_smooth=ctrl_smooth)
+              loss = neg_log_multinomial(k_obs=tf_counts, p_pred=profile_pred, device=device)
+              test_loss_epoch.append(loss.item())
+          test_loss.append(sum(test_loss_epoch)/len(test_loss_epoch))
+
+      if test_loss[-1] > np.array(test_loss).min():
+        patience_counter += 1
+      else:
+        patience_counter = 0
+        best_state_dict = model.state_dict()
+
+      if patience_counter == EARLY_STOP_PATIENCE:
+        break
+    
+    if RESTORE_BEST_WEIGHTS:
+      model.load_state_dict(best_state_dict)
+
+    # plot train and test loss
+    plt.plot(np.arange(epoch+1), np.array(train_loss), label="train")
+    plt.plot(np.arange(epoch+1), np.array(test_loss), label="test")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.show()
+
+    # save the model
+    torch.save(obj=model, f=f"/home/philipp/BPNet/trained_models/{n_channel}_conv_channel_model.pt")
+```
+
+## Evaluation
+
+```{python}
+test_dataset = ChIP_Nexus_Dataset(set_name="test", 
+                                  input_dir=INPUT_DIR, 
+                                  TF_list=TF_LIST)
+test_dataset
+```
+
+```{python}
+save_scores = []
+test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
+true_counts = test_dataset.tf_counts.copy()
+for n in n_channel_list:
+  model = torch.load(f"/home/philipp/BPNet/trained_models/{n}_conv_channel_model.pt")
+  # make predictions
+  pred = torch.zeros(test_dataset.tf_counts.shape, dtype=torch.float32).to(device)
+  with torch.no_grad():
+      for batch_idx, data in enumerate(test_dataloader):
+          one_hot, tf_counts, ctrl_counts, ctrl_smooth = data
+          one_hot, tf_counts, ctrl_counts, ctrl_smooth = one_hot.to(device), tf_counts.to(device), ctrl_counts.to(device), ctrl_smooth.to(device)
+          profile_pred = model.forward(sequence=one_hot, bias_raw=ctrl_counts, bias_smooth=ctrl_smooth)
+          pred[batch_idx, :, :, :] = profile_pred
+  all_pred = pred.cpu().numpy().copy()
+  assert np.allclose(all_pred.sum(axis=-1), 1)
+          
+  for i, tf in enumerate(TF_LIST): # loop over the four TFs
+      print(f"TF: {tf}")
+      pred_tf = all_pred[:, i, :, :]
+      counts_tf = true_counts[:, i, :, :]
+      labels, predictions, random = binary_labels_from_counts(counts_tf, pred_tf)
+      auprc_score = skm.average_precision_score(labels, predictions)
+      save_scores.append({"tf": tf,
+                          "n_channels":n,
+                          "auprc": auprc_score})
+```
+
+```{python}
+df = pd.DataFrame(save_scores)
+df.to_csv("/home/philipp/BPNet/out/conv_channel_auprc.csv")
+sns.scatterplot(data=df, x="n_channels", y="auprc", hue="tf", palette=color_pal)
+plt.show()
+```
+
+# Different Sizes of the first Kernel
+
+## Training (Only Shape Prediction)
+
+```{python}
+kernel_sizes = np.array([5, 9, 13, 17, 21, 25, 29, 33, 37])
+
+if retrain_kern_size:
+  for kern_size in kernel_sizes:
+    model = BPNet(n_dil_layers=9, TF_list=TF_LIST, pred_total=False, bias_track=True, conv_channels=64, size_first_kernel=kern_size).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=4*1e-4)
+
+    train_loader=DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=True)
+    tune_loader=DataLoader(tune_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
+
+    train_loss, test_loss = [], []
+    patience_counter = 0
+
+    for epoch in range(MAX_EPOCHS):
+      model.train()
+      train_loss_epoch = []
+      for one_hot, tf_counts, ctrl_counts, ctrl_smooth in train_loader:
+        one_hot, tf_counts, ctrl_counts, ctrl_smooth = one_hot.to(device), tf_counts.to(device), ctrl_counts.to(device), ctrl_smooth.to(device)
+        optimizer.zero_grad()
+        profile_pred = model.forward(sequence=one_hot, bias_raw=ctrl_counts, bias_smooth=ctrl_smooth)
+        loss = neg_log_multinomial(k_obs=tf_counts, p_pred=profile_pred, device=device)
+        train_loss_epoch.append(loss.item())
+        loss.backward()
+        optimizer.step()
+      train_loss.append(sum(train_loss_epoch)/len(train_loss_epoch))
+
+      # evaluation part
+      test_loss_epoch = []
+      with torch.no_grad():
+          for one_hot, tf_counts, ctrl_counts, ctrl_smooth in tune_loader:
+              one_hot, tf_counts, ctrl_counts, ctrl_smooth = one_hot.to(device), tf_counts.to(device), ctrl_counts.to(device), ctrl_smooth.to(device)
+              profile_pred = model.forward(sequence=one_hot, bias_raw=ctrl_counts, bias_smooth=ctrl_smooth)
+              loss = neg_log_multinomial(k_obs=tf_counts, p_pred=profile_pred, device=device)
+              test_loss_epoch.append(loss.item())
+          test_loss.append(sum(test_loss_epoch)/len(test_loss_epoch))
+
+      if test_loss[-1] > np.array(test_loss).min():
+        patience_counter += 1
+      else:
+        patience_counter = 0
+        best_state_dict = model.state_dict()
+
+      if patience_counter == EARLY_STOP_PATIENCE:
+        break
+    
+    if RESTORE_BEST_WEIGHTS:
+      model.load_state_dict(best_state_dict)
+
+    # plot train and test loss
+    plt.plot(np.arange(epoch+1), np.array(train_loss), label="train")
+    plt.plot(np.arange(epoch+1), np.array(test_loss), label="test")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.show()
+
+    # save the model
+    torch.save(obj=model, f=f"/home/philipp/BPNet/trained_models/{kern_size}_first_kern_size_model.pt")
+```
+
+## Evaluation
+
+```{python}
+test_dataset = ChIP_Nexus_Dataset(set_name="test", 
+                                  input_dir=INPUT_DIR, 
+                                  TF_list=TF_LIST)
+test_dataset
+```
+
+```{python}
+save_scores = []
+test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
+true_counts = test_dataset.tf_counts.copy()
+for n in kernel_sizes:
+  model = torch.load(f"/home/philipp/BPNet/trained_models/{n}_first_kern_size_model.pt")
+  # make predictions
+  pred = torch.zeros(test_dataset.tf_counts.shape, dtype=torch.float32).to(device)
+  with torch.no_grad():
+      for batch_idx, data in enumerate(test_dataloader):
+          one_hot, tf_counts, ctrl_counts, ctrl_smooth = data
+          one_hot, tf_counts, ctrl_counts, ctrl_smooth = one_hot.to(device), tf_counts.to(device), ctrl_counts.to(device), ctrl_smooth.to(device)
+          profile_pred = model.forward(sequence=one_hot, bias_raw=ctrl_counts, bias_smooth=ctrl_smooth)
+          pred[batch_idx, :, :, :] = profile_pred
+  all_pred = pred.cpu().numpy().copy()
+  assert np.allclose(all_pred.sum(axis=-1), 1)
+          
+  for i, tf in enumerate(TF_LIST): # loop over the four TFs
+      print(f"TF: {tf}")
+      pred_tf = all_pred[:, i, :, :]
+      counts_tf = true_counts[:, i, :, :]
+      labels, predictions, random = binary_labels_from_counts(counts_tf, pred_tf)
+      auprc_score = skm.average_precision_score(labels, predictions)
+      save_scores.append({"tf": tf,
+                          "first_kern_size": n,
+                          "auprc": auprc_score})
+```
+
+```{python}
+df = pd.DataFrame(save_scores)
+df.to_csv("/home/philipp/BPNet/out/first_kern_size_auprc.csv")
+sns.scatterplot(data=df, x="first_kern_size", y="auprc", hue="tf", palette=color_pal)
+plt.show()
+```

@@ -1,0 +1,15 @@
+---
+title: "00 Introduction"
+---
+
+# What
+
+![](img/ChIP-Nexus_Figure_inverted.jpg)
+
+![](img/chip_nexus_and_model_inverted.jpg)
+
+Notes:
+
+- Actually they used an adaption of ChIP-seq called ChIP-seq Nexus which comprises an additional exonuclease step yielding an increased resolution.
+
+

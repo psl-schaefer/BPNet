@@ -1,0 +1,475 @@
+---
+title: "Training and Metrics"
+jupyter: newtorch
+execute:
+  freeze: auto
+format:
+  html:
+    html-math-method: mathjax
+    theme: darkly
+    toc: true
+    number-sections: true
+    code-tools:
+      source: repo
+
+---
+
+# Train Parameters
+
+```{python}
+TF_LIST = ["Nanog", "Klf4", "Oct4", "Sox2"]
+#TF_LIST = ["Nanog"]
+INPUT_DIR = "/home/philipp/AML_Final_Project/output_correct/"
+BATCH_SIZE = 64
+MAX_EPOCHS = 100  
+EARLY_STOP_PATIENCE = 4
+RESTORE_BEST_WEIGHTS = True
+plot_while_train = False
+```
+
+# Libraries
+
+```{python}
+import matplotlib.pyplot as plt
+import numpy as np
+plt.style.use('dark_background')
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from src.architectures import BPNet
+from src.utils import ChIP_Nexus_Dataset, dummy_shape_predictions, dummy_total_counts_predictions
+from src.loss import neg_log_multinomial
+import pandas as pd
+```
+
+```{python}
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Using {device} device")
+```
+
+# Data
+
+```{python}
+train_dataset = ChIP_Nexus_Dataset(set_name="train", 
+                                   input_dir=INPUT_DIR, 
+                                   TF_list=TF_LIST)
+train_dataset
+```
+
+Determine $\lambda$ hyperparameter to weight between the negative multinomial log-likelihood for the shape prediction and the mean squared error for the total count prediction.
+
+```{python}
+lambda_param = (np.median(train_dataset.tf_counts.sum(axis=-1), axis=0)).mean() / 10
+lambda_param
+```
+
+```{python}
+dummy_shape_predictions(train_dataset)
+```
+
+```{python}
+dummy_total_counts_predictions(train_dataset)
+```
+
+```{python}
+tune_dataset = ChIP_Nexus_Dataset(set_name="tune", 
+                                  input_dir=INPUT_DIR, 
+                                  TF_list=TF_LIST)
+tune_dataset
+```
+
+```{python}
+dummy_shape_predictions(tune_dataset)
+```
+
+# Shape Prediction
+
+## Train Loop
+
+```{python}
+model = BPNet(n_dil_layers=9, TF_list=TF_LIST, pred_total=False, bias_track=True).to(device)
+optimizer = optim.Adam(model.parameters(), lr=4*1e-4)
+
+train_loader=DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=True)
+tune_loader=DataLoader(tune_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
+
+train_loss, test_loss = [], []
+patience_counter = 0
+
+for epoch in range(MAX_EPOCHS):
+  model.train()
+  train_loss_epoch = []
+  for one_hot, tf_counts, ctrl_counts, ctrl_smooth in train_loader:
+    one_hot, tf_counts, ctrl_counts, ctrl_smooth = one_hot.to(device), tf_counts.to(device), ctrl_counts.to(device), ctrl_smooth.to(device)
+    optimizer.zero_grad()
+    profile_pred = model.forward(sequence=one_hot, bias_raw=ctrl_counts, bias_smooth=ctrl_smooth)
+    loss = neg_log_multinomial(k_obs=tf_counts, p_pred=profile_pred, device=device)
+    train_loss_epoch.append(loss.item())
+    loss.backward()
+    optimizer.step()
+  train_loss.append(sum(train_loss_epoch)/len(train_loss_epoch))
+
+  # evaluation part
+  test_loss_epoch = []
+  with torch.no_grad():
+      for one_hot, tf_counts, ctrl_counts, ctrl_smooth in tune_loader:
+          one_hot, tf_counts, ctrl_counts, ctrl_smooth = one_hot.to(device), tf_counts.to(device), ctrl_counts.to(device), ctrl_smooth.to(device)
+          profile_pred = model.forward(sequence=one_hot, bias_raw=ctrl_counts, bias_smooth=ctrl_smooth)
+          loss = neg_log_multinomial(k_obs=tf_counts, p_pred=profile_pred, device=device)
+          test_loss_epoch.append(loss.item())
+      test_loss.append(sum(test_loss_epoch)/len(test_loss_epoch))
+          
+  if plot_while_train:
+    plt.plot(np.arange(epoch+1), np.array(train_loss), label="train")
+    plt.plot(np.arange(epoch+1), np.array(test_loss), label="test")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.show()
+
+  if test_loss[-1] > np.array(test_loss).min():
+    patience_counter += 1
+  else:
+    patience_counter = 0
+    best_state_dict = model.state_dict()
+
+  if patience_counter == EARLY_STOP_PATIENCE:
+    break
+
+if RESTORE_BEST_WEIGHTS:
+  model.load_state_dict(best_state_dict)
+```
+
+## Train and Tune Loss
+
+```{python}
+df = pd.DataFrame({"epoch": np.arange(1, epoch+2), "train": train_loss, "test": test_loss})
+df.to_csv("/home/philipp/BPNet/out/shape_loss.csv")
+plt.plot(np.arange(epoch+1), np.array(train_loss), label="train")
+plt.plot(np.arange(epoch+1), np.array(test_loss), label="test")
+plt.xlabel("Epoch")
+plt.ylabel("Loss")
+plt.legend()
+plt.show()
+```
+
+## Save Model
+
+```{python}
+torch.save(obj=model, f="/home/philipp/BPNet/trained_models/all_tfs_shape_model.pt")
+```
+
+## Evaluation
+
+```{python}
+model = torch.load("/home/philipp/BPNet/trained_models/all_tfs_shape_model.pt")
+```
+
+### Check Examples
+
+Plotting the real counts and the predictions for the first batch from the tune dataset.
+
+```{python}
+tune_loader=DataLoader(tune_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
+one_hot, tf_counts, ctrl_counts, ctrl_smooth = next(tune_loader.__iter__())
+one_hot, tf_counts, ctrl_counts, ctrl_smooth = one_hot.to(device), tf_counts.to(device), ctrl_counts.to(device), ctrl_smooth.to(device)
+profile_pred = model.forward(sequence=one_hot, bias_raw=ctrl_counts, bias_smooth=ctrl_smooth).to("cpu").detach().numpy()
+tf_counts = tf_counts.to("cpu").detach().numpy()
+scaled_pred = profile_pred * tf_counts.sum(axis=-1)[:,:,:,None]
+lw = 0.8
+```
+
+### Nanog
+
+```{python}
+tf = 0
+for i in range(profile_pred.shape[0]):
+  fig, axis = plt.subplots(1, 3, figsize=(16, 4))
+  axis[0].plot(tf_counts[i, tf, 0], label="chip counts", color="green", linewidth=lw)
+  axis[0].plot(-tf_counts[i, tf, 1], color="green", linewidth=lw)
+  axis[1].plot(tf_counts[i, tf, 0], label="chip counts", color="green", linewidth=lw)
+  axis[1].plot(-tf_counts[i, tf, 1], color="green", linewidth=lw)
+  axis[0].plot(scaled_pred[i, tf, 0], label="scaled pred", color="blue", linewidth=lw)
+  axis[0].plot(-scaled_pred[i, tf, 1], color="blue", linewidth=lw)
+  axis[2].plot(scaled_pred[i, tf, 0], label="scaled pred", color="blue", linewidth=lw)
+  axis[2].plot(-scaled_pred[i, tf, 1], color="blue", linewidth=lw)
+  axis[0].legend()
+  plt.show()
+```
+  
+### Klf4
+
+```{python}
+tf = 1
+for i in range(profile_pred.shape[0]):
+  fig, axis = plt.subplots(1, 3, figsize=(16, 4))
+  axis[0].plot(tf_counts[i, tf, 0], label="chip counts", color="green", linewidth=lw)
+  axis[0].plot(-tf_counts[i, tf, 1], color="green", linewidth=lw)
+  axis[1].plot(tf_counts[i, tf, 0], label="chip counts", color="green", linewidth=lw)
+  axis[1].plot(-tf_counts[i, tf, 1], color="green", linewidth=lw)
+  axis[0].plot(scaled_pred[i, tf, 0], label="scaled pred", color="blue", linewidth=lw)
+  axis[0].plot(-scaled_pred[i, tf, 1], color="blue", linewidth=lw)
+  axis[2].plot(scaled_pred[i, tf, 0], label="scaled pred", color="blue", linewidth=lw)
+  axis[2].plot(-scaled_pred[i, tf, 1], color="blue", linewidth=lw)
+  axis[0].legend()
+  plt.show()
+```
+
+### Oct4
+
+```{python}
+tf = 2
+for i in range(profile_pred.shape[0]):
+  fig, axis = plt.subplots(1, 3, figsize=(16, 4))
+  axis[0].plot(tf_counts[i, tf, 0], label="chip counts", color="green", linewidth=lw)
+  axis[0].plot(-tf_counts[i, tf, 1], color="green", linewidth=lw)
+  axis[1].plot(tf_counts[i, tf, 0], label="chip counts", color="green", linewidth=lw)
+  axis[1].plot(-tf_counts[i, tf, 1], color="green", linewidth=lw)
+  axis[0].plot(scaled_pred[i, tf, 0], label="scaled pred", color="blue", linewidth=lw)
+  axis[0].plot(-scaled_pred[i, tf, 1], color="blue", linewidth=lw)
+  axis[2].plot(scaled_pred[i, tf, 0], label="scaled pred", color="blue", linewidth=lw)
+  axis[2].plot(-scaled_pred[i, tf, 1], color="blue", linewidth=lw)
+  axis[0].legend()
+  plt.show()
+```
+
+### Sox2
+
+```{python}
+tf = 3
+for i in range(profile_pred.shape[0]):
+  fig, axis = plt.subplots(1, 3, figsize=(16, 4))
+  axis[0].plot(tf_counts[i, tf, 0], label="chip counts", color="green", linewidth=lw)
+  axis[0].plot(-tf_counts[i, tf, 1], color="green", linewidth=lw)
+  axis[1].plot(tf_counts[i, tf, 0], label="chip counts", color="green", linewidth=lw)
+  axis[1].plot(-tf_counts[i, tf, 1], color="green", linewidth=lw)
+  axis[0].plot(scaled_pred[i, tf, 0], label="scaled pred", color="blue", linewidth=lw)
+  axis[0].plot(-scaled_pred[i, tf, 1], color="blue", linewidth=lw)
+  axis[2].plot(scaled_pred[i, tf, 0], label="scaled pred", color="blue", linewidth=lw)
+  axis[2].plot(-scaled_pred[i, tf, 1], color="blue", linewidth=lw)
+  axis[0].legend()
+  plt.show()
+```
+
+```{python}
+# clean up
+del model
+```
+
+# Shape & Total Counts Prediction
+
+## Train Loop
+
+```{python}
+model = BPNet(n_dil_layers=9, TF_list=TF_LIST, pred_total=True, bias_track=True).to(device)
+optimizer = optim.Adam(model.parameters(), lr=4*1e-4)
+
+train_loader=DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=True)
+tune_loader=DataLoader(tune_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
+
+train_shape_loss, train_count_loss, train_loss = [], [], []
+test_shape_loss, test_count_loss, test_loss = [], [], []
+
+patience_counter = 0
+
+for epoch in range(MAX_EPOCHS):
+  model.train()
+  train_shape_loss_epoch, train_count_loss_epoch, train_loss_epoch = [], [], []
+  for one_hot, tf_counts, ctrl_counts, ctrl_smooth in train_loader:
+    one_hot, tf_counts, ctrl_counts, ctrl_smooth = one_hot.to(device), tf_counts.to(device), ctrl_counts.to(device), ctrl_smooth.to(device)
+    optimizer.zero_grad()
+    shape_pred, count_pred = model.forward(sequence=one_hot, bias_raw=ctrl_counts, bias_smooth=ctrl_smooth)
+    shape_loss = neg_log_multinomial(k_obs=tf_counts, p_pred=shape_pred, device=device)
+    count_loss = ((torch.log(1 + count_pred) - torch.log(1 + tf_counts.sum(axis=-1)))**2).mean()
+    loss = shape_loss + lambda_param * count_loss
+    train_shape_loss_epoch.append(shape_loss.item())
+    train_count_loss_epoch.append(count_loss.item())
+    train_loss_epoch.append(loss.item())
+    loss.backward()
+    optimizer.step()
+  train_shape_loss.append(sum(train_shape_loss_epoch)/len(train_shape_loss_epoch))
+  train_count_loss.append(sum(train_count_loss_epoch)/len(train_count_loss_epoch))
+  train_loss.append(sum(train_loss_epoch)/len(train_loss_epoch))
+
+  # evaluation part
+  test_shape_loss_epoch, test_count_loss_epoch, test_loss_epoch = [], [], []
+  with torch.no_grad():
+    for one_hot, tf_counts, ctrl_counts, ctrl_smooth in tune_loader:
+      one_hot, tf_counts, ctrl_counts, ctrl_smooth = one_hot.to(device), tf_counts.to(device), ctrl_counts.to(device), ctrl_smooth.to(device)
+      shape_pred, count_pred = model.forward(sequence=one_hot, bias_raw=ctrl_counts, bias_smooth=ctrl_smooth)
+      shape_loss = neg_log_multinomial(k_obs=tf_counts, p_pred=shape_pred, device=device)
+      count_loss = ((torch.log(1 + count_pred) - torch.log(1 + tf_counts.sum(axis=-1)))**2).mean()
+      loss = shape_loss + lambda_param * count_loss
+      test_shape_loss_epoch.append(shape_loss.item())
+      test_count_loss_epoch.append(count_loss.item())
+      test_loss_epoch.append(loss.item())
+    test_shape_loss.append(sum(test_shape_loss_epoch)/len(test_shape_loss_epoch))
+    test_count_loss.append(sum(test_count_loss_epoch)/len(test_count_loss_epoch))
+    test_loss.append(sum(test_loss_epoch)/len(test_loss_epoch))
+          
+  if plot_while_train:
+    fig, axis = plt.subplots(1, 3, figsize=(12, 3))
+    axis[0].plot(np.arange(1, epoch+2), np.array(train_shape_loss), label="train")
+    axis[0].plot(np.arange(1, epoch+2), np.array(test_shape_loss), label="test")
+    axis[0].set_xlabel("Epoch")
+    axis[0].set_ylabel("Loss")
+    axis[0].set_title("Shape Loss")
+    
+    axis[1].plot(np.arange(1, epoch+2), np.array(train_count_loss), label="train")
+    axis[1].plot(np.arange(1, epoch+2), np.array(test_count_loss), label="test")
+    axis[1].set_xlabel("Epoch")
+    axis[1].set_ylabel("Loss")
+    axis[1].set_title("Count Loss")
+
+    axis[2].plot(np.arange(1, epoch+2), np.array(train_loss), label="train")
+    axis[2].plot(np.arange(1, epoch+2), np.array(test_loss), label="test")
+    axis[2].set_xlabel("Epoch")
+    axis[2].set_ylabel("Loss")
+    axis[2].set_title("Combined Loss")
+
+    plt.legend()
+    plt.show()
+
+  if test_loss[-1] > np.array(test_loss).min():
+    patience_counter += 1
+  else:
+    patience_counter = 0
+    best_state_dict = model.state_dict()
+
+  print(f"Epoch: {epoch} | Patience Counter: {patience_counter}")
+
+  if patience_counter == EARLY_STOP_PATIENCE:
+    break
+
+if RESTORE_BEST_WEIGHTS:
+  model.load_state_dict(best_state_dict)
+```
+
+## Train and Tune Loss
+
+```{python}
+df = pd.DataFrame({"epoch": np.arange(1, epoch+2), "train_shape": train_shape_loss, "test_shape": test_shape_loss, "train_count": train_count_loss, "test_count": test_count_loss, "train": train_loss, "test": test_loss})
+df.to_csv("/home/philipp/BPNet/out/shape_counts_loss.csv")
+fig, axis = plt.subplots(1, 3, figsize=(12, 3))
+axis[0].plot(np.arange(1, epoch+2), np.array(train_shape_loss), label="train")
+axis[0].plot(np.arange(1, epoch+2), np.array(test_shape_loss), label="test")
+axis[0].set_xlabel("Epoch")
+axis[0].set_ylabel("Loss")
+axis[0].set_title("Shape Loss")
+
+axis[1].plot(np.arange(1, epoch+2), np.array(train_count_loss), label="train")
+axis[1].plot(np.arange(1, epoch+2), np.array(test_count_loss), label="test")
+axis[1].set_xlabel("Epoch")
+axis[1].set_ylabel("Loss")
+axis[1].set_title("Count Loss")
+
+axis[2].plot(np.arange(1, epoch+2), np.array(train_loss), label="train")
+axis[2].plot(np.arange(1, epoch+2), np.array(test_loss), label="test")
+axis[2].set_xlabel("Epoch")
+axis[2].set_ylabel("Loss")
+axis[2].set_title("Combined Loss")
+
+plt.legend()
+plt.show()
+```
+
+## Save Model
+
+```{python}
+torch.save(obj=model, f="/home/philipp/BPNet/trained_models/all_tfs_model.pt")
+```
+
+## Evaluation
+
+```{python}
+model = torch.load("/home/philipp/BPNet/trained_models/all_tfs_model.pt")
+```
+
+### Check Examples
+
+Plotting the real counts and the predictions for the first batch from the tune dataset.
+
+```{python}
+tune_loader=DataLoader(tune_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
+one_hot, tf_counts, ctrl_counts, ctrl_smooth = next(tune_loader.__iter__())
+one_hot, tf_counts, ctrl_counts, ctrl_smooth = one_hot.to(device), tf_counts.to(device), ctrl_counts.to(device), ctrl_smooth.to(device)
+profile_pred, _ = model.forward(sequence=one_hot, bias_raw=ctrl_counts, bias_smooth=ctrl_smooth)
+profile_pred = profile_pred.to("cpu").detach().numpy()
+tf_counts = tf_counts.to("cpu").detach().numpy()
+scaled_pred = profile_pred * tf_counts.sum(axis=-1)[:,:,:,None]
+lw = 0.8
+```
+
+### Nanog
+
+```{python}
+tf = 0
+for i in range(profile_pred.shape[0]):
+  fig, axis = plt.subplots(1, 3, figsize=(16, 4))
+  axis[0].plot(tf_counts[i, tf, 0], label="chip counts", color="green", linewidth=lw)
+  axis[0].plot(-tf_counts[i, tf, 1], color="green", linewidth=lw)
+  axis[1].plot(tf_counts[i, tf, 0], label="chip counts", color="green", linewidth=lw)
+  axis[1].plot(-tf_counts[i, tf, 1], color="green", linewidth=lw)
+  axis[0].plot(scaled_pred[i, tf, 0], label="scaled pred", color="blue", linewidth=lw)
+  axis[0].plot(-scaled_pred[i, tf, 1], color="blue", linewidth=lw)
+  axis[2].plot(scaled_pred[i, tf, 0], label="scaled pred", color="blue", linewidth=lw)
+  axis[2].plot(-scaled_pred[i, tf, 1], color="blue", linewidth=lw)
+  axis[0].legend()
+  plt.show()
+```
+  
+### Klf4
+
+```{python}
+tf = 1
+for i in range(profile_pred.shape[0]):
+  fig, axis = plt.subplots(1, 3, figsize=(16, 4))
+  axis[0].plot(tf_counts[i, tf, 0], label="chip counts", color="green", linewidth=lw)
+  axis[0].plot(-tf_counts[i, tf, 1], color="green", linewidth=lw)
+  axis[1].plot(tf_counts[i, tf, 0], label="chip counts", color="green", linewidth=lw)
+  axis[1].plot(-tf_counts[i, tf, 1], color="green", linewidth=lw)
+  axis[0].plot(scaled_pred[i, tf, 0], label="scaled pred", color="blue", linewidth=lw)
+  axis[0].plot(-scaled_pred[i, tf, 1], color="blue", linewidth=lw)
+  axis[2].plot(scaled_pred[i, tf, 0], label="scaled pred", color="blue", linewidth=lw)
+  axis[2].plot(-scaled_pred[i, tf, 1], color="blue", linewidth=lw)
+  axis[0].legend()
+  plt.show()
+```
+
+### Oct4
+
+```{python}
+tf = 2
+for i in range(profile_pred.shape[0]):
+  fig, axis = plt.subplots(1, 3, figsize=(16, 4))
+  axis[0].plot(tf_counts[i, tf, 0], label="chip counts", color="green", linewidth=lw)
+  axis[0].plot(-tf_counts[i, tf, 1], color="green", linewidth=lw)
+  axis[1].plot(tf_counts[i, tf, 0], label="chip counts", color="green", linewidth=lw)
+  axis[1].plot(-tf_counts[i, tf, 1], color="green", linewidth=lw)
+  axis[0].plot(scaled_pred[i, tf, 0], label="scaled pred", color="blue", linewidth=lw)
+  axis[0].plot(-scaled_pred[i, tf, 1], color="blue", linewidth=lw)
+  axis[2].plot(scaled_pred[i, tf, 0], label="scaled pred", color="blue", linewidth=lw)
+  axis[2].plot(-scaled_pred[i, tf, 1], color="blue", linewidth=lw)
+  axis[0].legend()
+  plt.show()
+```
+
+### Sox2
+
+```{python}
+tf = 3
+for i in range(profile_pred.shape[0]):
+  fig, axis = plt.subplots(1, 3, figsize=(16, 4))
+  axis[0].plot(tf_counts[i, tf, 0], label="chip counts", color="green", linewidth=lw)
+  axis[0].plot(-tf_counts[i, tf, 1], color="green", linewidth=lw)
+  axis[1].plot(tf_counts[i, tf, 0], label="chip counts", color="green", linewidth=lw)
+  axis[1].plot(-tf_counts[i, tf, 1], color="green", linewidth=lw)
+  axis[0].plot(scaled_pred[i, tf, 0], label="scaled pred", color="blue", linewidth=lw)
+  axis[0].plot(-scaled_pred[i, tf, 1], color="blue", linewidth=lw)
+  axis[2].plot(scaled_pred[i, tf, 0], label="scaled pred", color="blue", linewidth=lw)
+  axis[2].plot(-scaled_pred[i, tf, 1], color="blue", linewidth=lw)
+  axis[0].legend()
+  plt.show()
+```
