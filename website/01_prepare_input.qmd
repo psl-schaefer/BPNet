@@ -11,7 +11,7 @@ format:
     number-sections: true
     code-tools:
       source: repo
-
+description: "From raw ChIP-seq data to model input."
 ---
 
 ```{r setup, include=FALSE}

@@ -1,5 +1,5 @@
 ---
-title: "Training and Metrics"
+title: "04 Architecture Comparisons"
 jupyter: newtorch
 execute:
   freeze: auto
@@ -11,6 +11,7 @@ format:
     number-sections: true
     code-tools:
       source: repo
+description: "Comparing different number of dilated convolutional layers, different number of channels in each dilated convolutational layer, and different kernel sizes for the first layer."
 ---
 
 # Train Parameters
@@ -26,7 +27,7 @@ RESTORE_BEST_WEIGHTS = True
 plot_while_train = False
 retrain_conv_layers = False
 retrain_channel = False
-retrain_kern_size = True
+retrain_kern_size = False
 ```
 
 # Libraries
@@ -183,7 +184,6 @@ for n in n_layers_list:
   assert np.allclose(all_pred.sum(axis=-1), 1)
           
   for i, tf in enumerate(TF_LIST): # loop over the four TFs
-      print(f"TF: {tf}")
       pred_tf = all_pred[:, i, :, :]
       counts_tf = true_counts[:, i, :, :]
       labels, predictions, random = binary_labels_from_counts(counts_tf, pred_tf)
@@ -292,7 +292,6 @@ for n in n_channel_list:
   assert np.allclose(all_pred.sum(axis=-1), 1)
           
   for i, tf in enumerate(TF_LIST): # loop over the four TFs
-      print(f"TF: {tf}")
       pred_tf = all_pred[:, i, :, :]
       counts_tf = true_counts[:, i, :, :]
       labels, predictions, random = binary_labels_from_counts(counts_tf, pred_tf)
@@ -401,7 +400,6 @@ for n in kernel_sizes:
   assert np.allclose(all_pred.sum(axis=-1), 1)
           
   for i, tf in enumerate(TF_LIST): # loop over the four TFs
-      print(f"TF: {tf}")
       pred_tf = all_pred[:, i, :, :]
       counts_tf = true_counts[:, i, :, :]
       labels, predictions, random = binary_labels_from_counts(counts_tf, pred_tf)

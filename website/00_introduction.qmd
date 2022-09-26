@@ -1,5 +1,6 @@
 ---
 title: "00 Introduction"
+description: "What data do we have, what are we predicting and why are we doing that?"
 ---
 
 # What

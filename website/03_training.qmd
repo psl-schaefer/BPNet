@@ -1,5 +1,5 @@
 ---
-title: "Training and Metrics"
+title: "03 Training and Metrics"
 jupyter: newtorch
 execute:
   freeze: auto
@@ -11,6 +11,7 @@ format:
     number-sections: true
     code-tools:
       source: repo
+description: "Training BPNet to predict the ChIP-Nexus profiles and total counts for all four TFs."
 ---
 
 # Train Parameters

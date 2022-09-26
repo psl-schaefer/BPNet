@@ -1,23 +1,8 @@
 ---
-title: "Index"
+title: "Overview"
+listing:
+  type: default
+  fields: [title, description]
 ---
 
-0. [Introduction](https://schae211.github.io/aml_final/00_introduction.html)
 
-1. [Prepare Input](https://schae211.github.io/aml_final/01_prepare_input.html)
-
-2. [Dataset API](https://schae211.github.io/aml_final/02_dataset_api.html)
-
-3. [Architecture API](https://schae211.github.io/aml_final/03_architecture_api.html)
-
-4. [Dummy Models](https://schae211.github.io/aml_final/04_dummy_models.html)
-
-5. [Nanog Shape Prediction](https://schae211.github.io/aml_final/05_small_model.html)
-
-6. [Nanog + Klf4 Shape Prediction](https://schae211.github.io/aml_final/06_medium_model.html)
-
-7. [Perturbation Experiments](https://schae211.github.io/aml_final/07_pertubation_api.html)
-
-8. [Overfitting Experiments](https://schae211.github.io/aml_final/08_overfitting.html)
-
-9. [All TFs Shape Prediction](https://schae211.github.io/aml_final/09_large_model.html)

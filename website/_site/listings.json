@@ -1,0 +1,12 @@
+[
+  {
+    "listing": "/index.html",
+    "items": [
+      "/00_introduction.html",
+      "/01_prepare_input.html",
+      "/02_APIs.html",
+      "/03_training.html",
+      "/04_architecture_comparison.html"
+    ]
+  }
+]

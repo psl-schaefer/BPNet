@@ -1,5 +1,5 @@
 ---
-title: "Dataset and NN Architecture API"
+title: "02 Dataset and NN Architecture API"
 jupyter: newtorch
 format:
   html:
@@ -9,7 +9,7 @@ format:
     number-sections: true
     code-tools:
       source: repo
-
+description: "Documentation for our dataset and neural network architecture API."
 ---
 
 # Libraries
@@ -29,13 +29,18 @@ from src.architectures import BPNet
 
 # Dataset API
 
+```{python}
+INPUT_DIR = "/home/philipp/BPNet/input/"
+```
+
+
 ## Example 1: Create Train Dataset for all TFs
 
 One has to provide the set which must be one of "train", "tune", "test" as well as the input directory and the list of TFs one wants to model.
 
 ```{python}
 whole_dataset = ChIP_Nexus_Dataset(set_name="train", 
-                                   input_dir="/home/philipp/AML_Final_Project/output_correct/", 
+                                   input_dir=INPUT_DIR, 
                                    TF_list=['Sox2', 'Oct4', 'Klf4', 'Nanog'])
 whole_dataset
 ```
@@ -52,7 +57,7 @@ If we only want to take one or a few TFs into consideration we can specify which
 
 ```{python}
 small_dataset = ChIP_Nexus_Dataset(set_name="train", 
-                                   input_dir="/home/philipp/AML_Final_Project/output_correct/", 
+                                   input_dir=INPUT_DIR, 
                                    TF_list=['Sox2'])
 small_dataset
 ```
@@ -78,7 +83,7 @@ Looking at the histogram of the log2 qValue, we might decide to only keep peaks 
 
 ```{python}
 highconf_dataset = ChIP_Nexus_Dataset(set_name="train", 
-                                      input_dir="/home/philipp/AML_Final_Project/output_correct/", 
+                                      input_dir=INPUT_DIR, 
                                       TF_list=["Sox2"],
                                       qval_thr=2**cutoff)
 highconf_dataset
@@ -94,7 +99,7 @@ Now we might also want to create a training set that contains all the regions bu
 
 ```{python}
 sox2_all_regions = ChIP_Nexus_Dataset(set_name="train", 
-                                      input_dir="/home/philipp/AML_Final_Project/output_correct/", 
+                                      input_dir=INPUT_DIR, 
                                       TF_list=["Sox2"], 
                                       subset=False)
 sox2_all_regions
@@ -146,7 +151,7 @@ model_4
 
 ```{python}
 test_dataset = ChIP_Nexus_Dataset(set_name="test", 
-                                  input_dir="/home/philipp/AML_Final_Project/output_correct/", 
+                                  input_dir=INPUT_DIR, 
                                   TF_list=['Oct4', 'Sox2', 'Nanog', 'Klf4'])
 test_dataset
 ```
