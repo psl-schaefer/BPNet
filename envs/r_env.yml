@@ -1,0 +1,19 @@
+name: r-env-bpnet
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - r-base
+  - r-essentials
+  - r-reticulate
+  - r-tidyverse
+  - r-furrr
+  - python
+  - bioconductor-plyranges
+  - bioconductor-rtracklayer
+  - bioconductor-genomicalignments
+  - bioconductor-brgenomics
+  - bioconductor-bsgenome.mmusculus.ucsc.mm10
+  - bioconductor-motifmatchr
+  - bioconductor-jaspar2020
+  - bioconductor-tfbstools

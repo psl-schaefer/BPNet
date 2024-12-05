@@ -1,0 +1,70 @@
+---
+title: "Data Download"
+jupyter: py-env-bpnet
+execute:
+  freeze: auto
+---
+
+- We can downlaod the data from [https://zenodo.org/records/3371216](https://zenodo.org/records/3371216)
+
+```{python}
+import requests
+from pathlib import Path
+import tarfile
+
+data_tar = Path("..") / "data.tar.gz"
+data_directory = Path("..") / "data"
+
+if data_directory.exists():
+    print(f"Data directory already exists at {data_directory}.")
+elif data_tar.exists():
+    print(f"Tar.gz file found at {data_tar}. Extracting...")
+    with tarfile.open(data_tar, "r:gz") as tar_ref:
+        tar_ref.extractall(data_directory)
+    print("Extraction complete.")
+    # Delete the tar file
+    data_tar.unlink()
+    print(f"Deleted tar.gz file at {data_tar}.")
+else:
+    data_url = "https://zenodo.org/records/3371216/files/data.tar.gz?download=1"
+    response = requests.get(data_url, stream=True)
+    response.raise_for_status()  # Raise an error for bad HT
+    with open(data_tar, "wb") as file:
+        for chunk in response.iter_content(chunk_size=8192):
+            file.write(chunk)
+    print(f"Downloaded and saved tar.gz file at {data_tar}.")
+    print("Extracting the tar.gz file...")
+    with tarfile.open(data_tar, "r:gz") as tar_ref:
+        tar_ref.extractall(data_directory)
+    print("Extraction complete.")
+    data_tar.unlink()
+    print(f"Deleted tar.gz file at {data_tar}.")
+list(data_directory.iterdir())
+```
+
+- Since the data directory is quite large we will delete the files we don't need.
+
+```{python}
+
+```
+
+- Furthermore we download the `mm10.fa` file
+
+```{python}
+mm10_file = data_directory / "mm10.fa.gz"
+mm10_url = "https://hgdownload.soe.ucsc.edu/goldenPath/mm10/bigZips/mm10.fa.gz"
+# Check if the file already exists
+if mm10_file.exists():
+    print(f"File already exists at {mm10_file}. Skipping download.")
+else:
+    # Download the file
+    print(f"Downloading {mm10_url}...")
+    response = requests.get(mm10_url, stream=True)
+    response.raise_for_status()  # Raise an error for bad HTTP responses
+
+    # Save the file
+    with open(mm10_file, "wb") as file:
+        for chunk in response.iter_content(chunk_size=8192):
+            file.write(chunk)
+    print(f"Downloaded and saved file at {mm10_file}.")
+```

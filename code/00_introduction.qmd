@@ -1,0 +1,19 @@
+---
+title: "Introduction"
+---
+
+# TODO
+
+What data do we have, what are we predicting and why are we doing that?
+
+# What
+
+![](img/ChIP-Nexus_Figure_inverted.jpg)
+
+![](img/chip_nexus_and_model_inverted.jpg)
+
+Notes:
+
+- Actually they used an adaption of ChIP-seq called ChIP-seq Nexus which comprises an additional exonuclease step yielding an increased resolution.
+
+

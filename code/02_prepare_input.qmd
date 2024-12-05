@@ -1,0 +1,916 @@
+---
+title: "Prepare Input"
+engine: knitr
+execute:
+  freeze: auto
+---
+
+# Description 
+
+- Here we generate the model input based on the raw ChIP-Nexus data.
+
+```{r setup, include=FALSE}
+# check cache.lazy: https://bookdown.org/yihui/rmarkdown-cookbook/cache-lazy.html
+knitr::opts_chunk$set(cache = TRUE, 
+                      warning = TRUE, 
+                      message = TRUE, 
+                      cache.lazy = FALSE # by default this is set to true I think
+                      )
+
+# tmp for plotting
+# load("/Users/pschafer/Learning/BPNet/prc/tmp.RData")
+```
+
+# Libraries
+
+```{r cache=FALSE}
+suppressPackageStartupMessages({
+  library(reticulate)
+  library(rtracklayer)
+  library(GenomicAlignments)
+  library(BRGenomics)
+  library(BSgenome.Mmusculus.UCSC.mm10)
+  library(tidyverse)
+  library(furrr)
+  library(motifmatchr)
+  library(JASPAR2020)
+  library(TFBSTools)
+  library(plyranges)
+})
+# Setup Multiprocessing
+options(future.globals.maxSize=5000*1024^2)
+future::plan(future::multisession, workers = 4)
+```
+
+# Configs
+
+## Data Download
+
+- The data can be downloaded from: https://zenodo.org/records/3371216 (~ 30 GBs) as shown in the download.qmd file.
+
+```{r}
+data_dir <- file.path("..", "data")
+```
+
+## Output Directory
+
+```{r cache=FALSE}
+output_dir <- file.path("..", "prc")
+figure_dir <- file.path("..", "figures", "prepare_input")
+dir.create(output_dir, recursive=TRUE, showWarnings=FALSE)
+dir.create(figure_dir, recursive=TRUE, showWarnings=FALSE)
+
+TFs <- c("Sox2", "Oct4", "Klf4", "Nanog")
+
+purrr::walk(c(TFs, "patchcap"), function(dir_name) {
+  dir.create(file.path(output_dir, dir_name), recursive=TRUE, showWarnings=FALSE)
+})
+```
+
+## Peak Width
+
+As in the BPNet paper, we are using a peak width of 1000 bp, meaning we consider 500 bp up- and downstream of the ChIP-seq peaks.
+
+```{r}
+peak_width <- 1000
+```
+
+## Chromosome Train/Tune/Test split
+
+```{r}
+all_chroms <- paste0("chr", c(1:19, "X", "Y"))
+
+# we use the same train/tune/test split as in the BPnet paper
+chrom_list <- list("tune" = c("chr2", "chr3", "chr4"), # tune set (hyperparameter tuning): chromosomes 2, 3, 4
+                   "test" = c("chr1", "chr8", "chr9")) # test set (performance evaluation): chromosome 1, 8, 9
+chrom_list$train <- setdiff(all_chroms, c(chrom_list$tune, chrom_list$test)) # train set: all other chromosomes
+chrom_list
+```
+
+## Colors
+
+```{r}
+colors = c("Klf4" = "#92C592",
+           "Nanog" = "#FFE03F",
+           "Oct4" = "#CD5C5C",
+           "Sox2" = "#849EEB",
+           "patchcap" = "#827F81")
+```
+
+# Function for One-Hot Encoding
+
+Traditionally DNA sequences are encoded using: A = [1, 0, 0, 0], C = [0, 1, 0, 0], G = [0, 0, 1, 0], T = [0, 0, 0, 1], N = [0, 0, 0, 0].
+
+```{r}
+one_hot <- function(sequence) {
+  len = nchar(sequence)
+  mtx <- matrix(data=0, nrow=4, ncol=len)
+  for (i in 1:len) {
+    if (substr(sequence, i, i) == "A") mtx[1, i] = 1
+    else if (substr(sequence, i, i) == "C") mtx[2, i] = 1
+    else if (substr(sequence, i, i) == "G") mtx[3, i] = 1
+    else if (substr(sequence, i, i) == "T") mtx[4, i] = 1
+  }
+  return(mtx)
+}
+
+compiler::enableJIT(0)
+one_hot_c <- compiler::cmpfun(one_hot) # compiling to bytecode not machine code like numba
+```
+
+# Read Stats
+
+- Look at the reading stats per TF to check how comparable the different ChIP-Nexus experiments are.
+
+```{r}
+total_reads <- TFs %>%
+  purrr::set_names() %>%
+  purrr::map_dbl(function(tf) {
+    Rsamtools::countBam(file.path(data_dir, "chip-nexus", tf, "pool_filt.bam"))$records
+  })
+```
+
+```{r cache=FALSE}
+ggplot() +
+  geom_bar(aes(y=names(total_reads), x=total_reads/1e6), stat="identity", 
+           fill="blue", alpha=0.4, width=0.4) +
+  labs(x="Number of Read (x 10^6)", y="TF") +
+  ggdark::dark_mode(verbose=FALSE)
+```
+
+# Load the Peak Data
+
+- For each transcription factor (TF) we read in the peak information provided by the authors of the BPNet paper. The peaks were called using `MACS2`  (v.2.1.1.20160309). The following non-default settings were used: `shift=-75`, `extsize=150`, meaning the 5' ends of each read were extended 75 bp in both directions.
+
+- In particular `shift=-75` means the 5' ends of the reads are moved -75 bp and `extsize=150` means the reads are extended to a fixed length of 150 bp in 5' -> 3' direction.
+
+<details>
+<summary>Click to view sketch</summary>
+![](img/macs2_explanation.png)
+</details>
+
+- Check the `macs3 callpeak` documentation [here](https://macs3-project.github.io/MACS/docs/callpeak.html)
+
+```{r}
+peak_infos <- purrr::map(TFs, function(tf) {
+
+  narrowPeaks <- 
+    rtracklayer::import(file.path(data_dir, "chip-nexus", tf, "idr-optimal-set.narrowPeak.gz"), 
+                        format="narrowPeak")
+  
+  # read in the peak summits and extend symmetrically to get 1000 bp width
+  summits <- 
+    rtracklayer::import(file.path(data_dir, "chip-nexus", tf, "idr-optimal-set.summit.bed.gz"), 
+                           format="bed") %>%
+    GenomicRanges::resize(width=peak_width, fix="center") %>%
+    plyranges::mutate(TF = tf) %>%
+    plyranges::mutate(set = dplyr::case_when(
+                        as.character(seqnames) %in% chrom_list$tune ~ "tune",
+                        as.character(seqnames) %in% chrom_list$test ~ "test",
+                        as.character(seqnames) %in% chrom_list$train ~ "train"))
+  
+  GenomicRanges::elementMetadata(summits) <- cbind(
+    GenomicRanges::elementMetadata(summits),
+    GenomicRanges::elementMetadata(narrowPeaks)
+  )
+  
+  summits
+
+}) %>%
+  do.call(what=c, args=.)
+
+# save peak info as tsv
+write_delim(data.frame(peak_infos) %>% dplyr::mutate(Region = paste0(seqnames, ":", start, "-", end)), 
+            file=file.path(output_dir, "region_info.tsv"), delim = "\t")
+
+peak_infos %>% as.data.frame() %>% head
+```
+
+## Distribution of the MACS Scores
+
+- We see that the distribution of MACS scores (qValues) is quite comparable for the different TFs.
+
+```{r cache=FALSE, fig.width=4, fig.height=4}
+p <- peak_infos %>%
+  as.data.frame() %>%
+  ggplot() +
+  geom_density(aes(x=log2(qValue), color=TF), alpha=0.4, fill=NA) +
+  labs(x="Log2 qValue", y="Density", color="TF") +
+  scale_color_manual(values=colors) +
+  theme_bw()
+ggsave(filename = file.path(figure_dir, "macs2_scores_per_tf.pdf"),
+       plot = p, width = 4, height = 4)
+p +
+  ggdark::dark_mode(verbose=FALSE)
+```
+
+## Number of Peaks per TF
+
+- However the number of peaks is quite different. There are many more peaks for Nanog and Klf4. 
+
+- What does this mean for the training?
+
+```{r cache=FALSE, fig.width=4, fig.height=4}
+p <- peak_infos %>%
+  as.data.frame() %>%
+  ggplot() +
+  geom_bar(aes(y=TF, fill=TF), alpha=0.4, width=0.4, color="black") +
+  labs(x="Number of Peaks", y="TF") +
+  theme_bw() +
+  scale_fill_manual(values=colors)
+ggsave(filename = file.path(figure_dir, "n_peaks_per_tf.pdf"),
+       plot = p, width = 4, height = 4)
+p +
+  ggdark::dark_mode(verbose=FALSE)
+```
+
+# Translate Peak Sequences to One-Hot Encoding
+
+```{r}
+seq_names <- purrr::imap(chrom_list, function(set_chroms, set_name) {
+
+  peak_info_subset <- peak_infos[seqnames(peak_infos) %in% set_chroms]
+
+  rnames <- paste0(as.character(peak_info_subset@seqnames), ":",
+         peak_info_subset@ranges@start, "-",
+         peak_info_subset@ranges@start + peak_info_subset@ranges@width - 1)
+  
+  write_lines(rnames, file = file.path(output_dir, paste0(set_name, "_seq_names.txt")))
+  
+  rnames
+})
+str(seq_names)
+```
+
+```{r}
+one_hot_seqs <- furrr::future_imap(chrom_list, function(set_chroms, set_name) {
+
+  peak_info_subset <- peak_infos[seqnames(peak_infos) %in% set_chroms]
+
+  peak_seqs <- BSgenome::getSeq(
+    BSgenome.Mmusculus.UCSC.mm10,
+    names=as.character(peak_info_subset@seqnames),
+    start=(peak_info_subset@ranges@start),
+    end=(peak_info_subset@ranges@start + peak_width - 1),
+    strand="+"
+  )
+  peak_seqs@ranges@NAMES <- seq_names[[set_name]]
+  # check for correctness here: https://genome.ucsc.edu/cgi-bin/hgTracks?db=mm10
+  Biostrings::writeXStringSet(x=peak_seqs,
+                              filepath = file.path(output_dir, paste0(set_name, "_seqs.fa")))
+
+  # one hot encode the sequence
+  one_hot_mtx <- matrix(data=0, nrow=length(peak_seqs)*4, ncol=peak_width)
+  for (peak_index in 1:length(peak_seqs)) {
+    one_hot_mtx[(((peak_index-1)*4)+1):((peak_index)*4), ] <-
+      one_hot_c(as.character(peak_seqs[[peak_index]]))
+  }
+  one_hot_mtx
+})
+```
+
+Check the output:
+
+```{r}
+str(one_hot_seqs)
+```
+
+Write the matrices in binary format to disk using `reticulate`.
+
+```{python}
+from pathlib import Path
+import numpy as np
+
+for key, val in r.one_hot_seqs.items():
+  old_shape = val.shape
+  val = val.reshape(int(val.shape[0]/4), 4, 1000).astype(np.float32)
+  print(f"{key}: {old_shape} -> {val.shape}")
+  save_path = Path(r.output_dir) / f"{key}_one_hot_seqs.npy"
+  print(f"-> {save_path}")
+  np.save(file=save_path, arr=val)
+```
+
+# Extract the TF Counts
+
+First we have to merge overlapping peaks from the peak info file. Otherwise we read reads aligning to these overlapping peaks several times.
+
+```{r}
+peak_infos_reduced <- GenomicRanges::reduce(
+  resize(peak_infos, GenomicRanges::width(peak_infos + 1), "start")
+  )
+peak_infos_reduced
+```
+
+```{r}
+### Parallel loop over all tfs
+tf_counts <- TFs %>%
+  purrr::set_names() %>%
+  furrr::future_map(function(tf) {
+    
+  # read only from the alignment file in the given peak regions
+  # note: make sure that the BAM file is sorted (check for presence of ".bam.bai")
+  alignments <- readGAlignments(file.path(data_dir, "chip-nexus", tf, "pool_filt.bam"),
+                                param = ScanBamParam(which=peak_infos_reduced))
+
+  # split the alignment into pos and neg strand
+  align_pos <- alignments[GenomicRanges::strand(alignments)=="+"]
+  align_neg <- alignments[GenomicRanges::strand(alignments)=="-"]
+
+  # only retain first base pair of each read
+  align_pos@cigar <- rep("1M", length(align_pos))
+  align_neg@start <- GenomicAlignments::end(align_neg)
+  align_neg@cigar <- rep("1M", length(align_neg))
+
+  # compute the coverage per base pair
+  cov_list = list("pos" = GenomicAlignments::coverage(align_pos, weight = 1L),
+                  "neg" = GenomicAlignments::coverage(align_neg, weight = 1L))
+    
+  chrom_list %>% 
+    purrr::imap(function(set_chroms, set_name) {
+      peak_info_subset <- peak_infos[seqnames(peak_infos) %in% set_chroms]
+      c("pos", "neg") %>%
+        purrr::set_names() %>%
+        purrr::map(function(strand) {
+          mtx <- matrix(data=0, ncol=peak_width, nrow=length(peak_info_subset))
+          for (i in 1:length(peak_info_subset)) {
+            chr <- as.character(peak_info_subset[i]@seqnames)
+            position_index <- peak_info_subset[i]@ranges@start:(peak_info_subset[i]@ranges@start + peak_width - 1)
+            mtx[i, ] = as.numeric(cov_list[[strand]][[chr]][position_index])
+          }
+          mtx
+      })
+    })
+  })
+```
+
+```{r}
+str(tf_counts)
+```
+
+Write the matrices in binary format to disk using `reticulate`.
+
+```{python}
+from pathlib import Path
+import numpy as np
+
+for tf_name, tf_entry in r.tf_counts.items():
+  print(tf_name)
+  for set_name, set_entry in tf_entry.items():
+    mtx = np.stack([set_entry["pos"], set_entry["neg"]], axis=1).astype(np.float32)
+    print(f"\t{set_name} shape: {mtx.shape}")
+    save_path = Path(r.output_dir) / tf_name / f"{set_name}_counts.npy"
+    print(f"\t-> {save_path}")
+    np.save(file=save_path, arr=mtx)
+
+```
+
+## Examples: Highest Scoring Peaks
+
+<details>
+<summary>Click to expand</summary>
+```{r cache=FALSE}
+test_df <- peak_infos %>%
+  as.data.frame() %>%
+  dplyr::filter(set=="train") %>%
+  dplyr::mutate(Region = paste0(seqnames, ":", start, "-", end)) %>%
+  dplyr::group_by(TF) %>%
+  slice_max(order_by=qValue, n=2) %>%
+  select(Region, TF, qValue)
+
+purrr::walk(1:nrow(test_df), function(i) {
+  test_instance <- unlist(test_df[i, ])
+  purrr::map_dfr(TFs, function(tf){
+  tibble::tibble(position=-499:500, 
+                 plus = tf_counts[[tf]]$train$pos[match(test_instance["Region"], seq_names$train), ],
+                 minus = -tf_counts[[tf]]$train$neg[match(test_instance["Region"], seq_names$train), ]) %>%
+    dplyr::mutate(TF = tf, p_name = test_instance["Region"])
+  }) %>% 
+  pivot_longer(cols=c(minus, plus)) %>%
+  ggplot() +
+  geom_line(aes(x=position, y=value, color=name)) +
+  facet_wrap(~TF, scales="free_y") +
+  ggdark::dark_mode(verbose=FALSE) +
+  labs(x="Relative Position [bp]", y="Counts", color="Strand", 
+       title=paste0("Peak ", test_instance["Region"], " | ", test_instance["TF"], 
+                    " | ", test_instance["qValue"])) -> p
+  print(p)
+})
+```
+</details>
+
+## Examples: Low Scoring Peaks
+
+<details>
+<summary>Click to expand</summary>
+```{r cache=FALSE}
+set.seed(42)
+test_df <- peak_infos %>%
+  as.data.frame() %>%
+  dplyr::filter(set=="train") %>%
+  dplyr::mutate(Region = paste0(seqnames, ":", start, "-", end)) %>%
+  dplyr::group_by(TF) %>%
+  slice_min(order_by=qValue, n=2) %>%
+  select(Region, TF, qValue)
+
+purrr::walk(1:nrow(test_df), function(i) {
+  test_instance <- unlist(test_df[i, ])
+  purrr::map_dfr(TFs, function(tf){
+  tibble::tibble(position=-499:500, 
+                 plus = tf_counts[[tf]]$train$pos[match(test_instance["Region"], seq_names$train), ],
+                 minus = -tf_counts[[tf]]$train$neg[match(test_instance["Region"], seq_names$train), ]) %>%
+    dplyr::mutate(TF = tf, p_name = test_instance["Region"])
+  }) %>% 
+  pivot_longer(cols=c(minus, plus)) %>%
+  ggplot() +
+  geom_line(aes(x=position, y=value, color=name)) +
+  facet_wrap(~TF, scales="free_y") +
+  ggdark::dark_mode(verbose=FALSE) +
+  labs(x="Relative Position [bp]", y="Counts", color="Strand", 
+       title=paste0("Peak ", test_instance["Region"], " | ", test_instance["TF"], 
+                    " | ", test_instance["qValue"])) -> p
+  print(p)
+})
+```
+</details>
+
+# Extract the Control (Patchcap) Counts
+
+```{r}
+patchcap_input <- 
+  c("pos", "neg") %>%
+  purrr::set_names() %>%
+  purrr::map(function(strand){
+  rtracklayer::import.bw(file.path(data_dir, "chip-nexus", "patchcap", paste0("counts.", strand, ".bw"))) %>%
+    GenomicRanges::coverage(., weight = "score")
+})
+
+ctrl_counts <- furrr::future_imap(chrom_list, function(set_chroms, set_name) {
+
+  peak_info_subset <- peak_infos[seqnames(peak_infos) %in% set_chroms]
+
+  c("pos", "neg") %>%
+    purrr::set_names() %>%
+    purrr::map(function(strand) {
+
+      mtx <- matrix(data=0, ncol=peak_width, nrow=length(peak_info_subset))
+  
+      for (seq_index in 1:nrow(mtx)) {
+        chrom_index <- as.character(peak_info_subset[seq_index]@seqnames)
+        position_index <- peak_info_subset[seq_index]@ranges@start:(peak_info_subset[seq_index]@ranges@start+peak_width-1)
+        mtx[seq_index, ] = as.numeric(patchcap_input[[strand]][[chrom_index]][position_index])
+      }
+      mtx
+  })
+})
+```
+
+```{r}
+str(ctrl_counts)
+```
+
+Write the matrices in binary format to disk using `reticulate`
+
+```{python}
+from pathlib import Path
+import numpy as np
+
+for set_name, set_entry in r.ctrl_counts.items():
+  mtx = np.stack([set_entry["pos"], set_entry["neg"]], axis=1).astype(np.float32)
+  print(f"\t{set_name} shape: {mtx.shape}")
+  save_path = Path(r.output_dir) / "patchcap" / f"{set_name}_counts.npy"
+  print(f"\t-> {save_path}")
+  np.save(file=save_path, arr=mtx)
+
+```
+
+## Examples: Highest Scoring Peaks with Bias
+
+```{r fig.width=4, fig.height=8}
+test_instance <- peak_infos %>%
+  as.data.frame() %>%
+  dplyr::filter(set=="test") %>%
+  dplyr::filter(seqnames=="chr1", start >= 180924752-1000, end <= 180925152+1000) %>%
+  dplyr::mutate(Region = paste0(seqnames, ":", start, "-", end)) %>%
+  dplyr::select(Region, TF, qValue) %>%
+  .[1, ]
+print(test_instance)
+
+p <- purrr::map_dfr(TFs, function(tf){
+  tibble::tibble(position=-499:500, 
+                 plus = tf_counts[[tf]]$test$pos[match(test_instance["Region"], seq_names$test), ],
+                 minus = -tf_counts[[tf]]$test$neg[match(test_instance["Region"], seq_names$test), ]) %>%
+    dplyr::mutate(TF = tf, p_name = test_instance["Region"])
+  }) %>% 
+  rbind(
+    tibble::tibble(position=-499:500, 
+                   plus = ctrl_counts$test$pos[match(test_instance["Region"], seq_names$test), ],
+                   minus = -ctrl_counts$test$neg[match(test_instance["Region"], seq_names$test), ],
+                   TF = "patchcap", p_name = test_instance["Region"])
+  ) %>%
+  pivot_longer(cols=c(minus, plus)) %>%
+  dplyr::mutate(TF = factor(TF, levels=names(colors))) %>%
+  ggplot() +
+  geom_line(aes(x=position, y=value, color=TF, alpha=name), size=0.2) +
+  facet_wrap(~TF, ncol=1, scales="free_y") +
+  labs(x="Relative Position [bp]", y="Counts", color="Strand", 
+       title=test_instance["Region"]) +
+  #scale_color_manual(values=c("minus"="darkred", "plus"="forestgreen")) +
+  scale_color_manual(values=colors) +
+  scale_alpha_manual(values=c("plus" = 1, "minus" = 1)) +
+  theme_bw() +
+  theme(plot.title = element_text(size=10, hjust=0.5), strip.background = element_rect(fill=NA))
+ggsave(filename = file.path(figure_dir, "example_high_q.pdf"), 
+       plot = p, width = 4, height = 8)
+p + 
+  ggdark::dark_mode(verbose=FALSE)
+```
+
+
+<details>
+<summary>Click to view more plots</summary>
+```{r cache=FALSE}
+test_df <- peak_infos %>%
+  as.data.frame() %>%
+  dplyr::filter(set=="train") %>%
+  dplyr::mutate(Region = paste0(seqnames, ":", start, "-", end)) %>%
+  dplyr::group_by(TF) %>%
+  slice_max(order_by=qValue, n=5) %>%
+  select(Region, TF, qValue)
+purrr::walk(1:nrow(test_df), function(i) {
+  test_instance <- unlist(test_df[i, ])
+  purrr::map_dfr(TFs, function(tf){
+  tibble::tibble(position=-499:500, 
+                 plus = tf_counts[[tf]]$train$pos[match(test_instance["Region"], seq_names$train), ],
+                 minus = -tf_counts[[tf]]$train$neg[match(test_instance["Region"], seq_names$train), ]) %>%
+    dplyr::mutate(TF = tf, p_name = test_instance["Region"])
+  }) %>% 
+  rbind(
+    tibble::tibble(position=-499:500, 
+                   plus = ctrl_counts$train$pos[match(test_instance["Region"], seq_names$train), ],
+                   minus = -ctrl_counts$train$neg[match(test_instance["Region"], seq_names$train), ],
+                   TF = "Bias", p_name = test_instance["Region"])
+  ) %>%
+  pivot_longer(cols=c(minus, plus)) %>%
+  ggplot() +
+  geom_line(aes(x=position, y=value, color=name)) +
+  facet_wrap(~TF, scales="free_y") +
+  ggdark::dark_mode(verbose=FALSE) +
+  labs(x="Relative Position [bp]", y="Counts", color="Strand", 
+       title=paste0("Peak ", test_instance["Region"], " | ", test_instance["TF"], 
+                    " | ", test_instance["qValue"])) -> p
+  print(p)
+})
+```
+
+## Examples: Random Peaks with Bias
+
+```{r fig.width=4, fig.height=8}
+test_instance <- peak_infos %>%
+  as.data.frame() %>%
+  dplyr::filter(set=="test") %>%
+  dplyr::filter(seqnames=="chr1", start >= 4000, end <= 100000000) %>%
+  dplyr::mutate(Region = paste0(seqnames, ":", start, "-", end)) %>%
+  dplyr::select(Region, TF, qValue) %>%
+  .[1000, ]
+print(test_instance)
+p <- purrr::map_dfr(TFs, function(tf){
+  tibble::tibble(position=-499:500, 
+                 plus = tf_counts[[tf]]$test$pos[match(test_instance["Region"], seq_names$test), ],
+                 minus = -tf_counts[[tf]]$test$neg[match(test_instance["Region"], seq_names$test), ]) %>%
+    dplyr::mutate(TF = tf, p_name = test_instance["Region"])
+  }) %>% 
+  rbind(
+    tibble::tibble(position=-499:500, 
+                   plus = ctrl_counts$test$pos[match(test_instance["Region"], seq_names$test), ],
+                   minus = -ctrl_counts$test$neg[match(test_instance["Region"], seq_names$test), ],
+                   TF = "patchcap", p_name = test_instance["Region"])
+  ) %>%
+  pivot_longer(cols=c(minus, plus)) %>%
+  dplyr::mutate(TF = factor(TF, levels=names(colors))) %>%
+  ggplot() +
+  geom_line(aes(x=position, y=value, color=TF, alpha=name), size=0.2) +
+  facet_wrap(~TF, ncol=1, scales="free_y") +
+  labs(x="Relative Position [bp]", y="Counts", color="Strand", 
+       title=test_instance["Region"]) +
+  #scale_color_manual(values=c("minus"="darkred", "plus"="forestgreen")) +
+  scale_color_manual(values=colors) +
+  scale_alpha_manual(values=c("plus" = 1, "minus" = 1)) +
+  theme_bw() +
+  theme(plot.title = element_text(size=10, hjust=0.5), strip.background = element_rect(fill=NA))
+ggsave(filename = file.path(figure_dir, "example_low_q.pdf"), 
+       plot = p, width = 4, height = 8)
+p + 
+  ggdark::dark_mode(verbose=FALSE)
+```
+
+<details>
+<summary>Click to view more plots</summary>
+```{r cache=FALSE}
+set.seed(42)
+test_df <- peak_infos %>%
+  as.data.frame() %>%
+  dplyr::filter(set=="train") %>%
+  dplyr::mutate(Region = paste0(seqnames, ":", start, "-", end)) %>%
+  dplyr::group_by(TF) %>%
+  slice_sample(n=5) %>%
+  select(Region, TF, qValue)
+
+purrr::walk(1:nrow(test_df), function(i) {
+  test_instance <- unlist(test_df[i, ])
+  purrr::map_dfr(TFs, function(tf){
+  tibble::tibble(position=-499:500, 
+                 plus = tf_counts[[tf]]$train$pos[match(test_instance["Region"], seq_names$train), ],
+                 minus = -tf_counts[[tf]]$train$neg[match(test_instance["Region"], seq_names$train), ]) %>%
+    dplyr::mutate(TF = tf, p_name = test_instance["Region"])
+  }) %>% 
+  rbind(
+    tibble::tibble(position=-499:500, 
+                   plus = ctrl_counts$train$pos[match(test_instance["Region"], seq_names$train), ],
+                   minus = -ctrl_counts$train$neg[match(test_instance["Region"], seq_names$train), ],
+                   TF = "Bias", p_name = test_instance["Region"])
+  ) %>%
+  pivot_longer(cols=c(minus, plus)) %>%
+  ggplot() +
+  geom_line(aes(x=position, y=value, color=name)) +
+  facet_wrap(~TF, scales="free_y") +
+  ggdark::dark_mode(verbose=FALSE) +
+  labs(x="Relative Position [bp]", y="Counts", color="Strand", 
+       title=paste0("Peak ", test_instance["Region"], " | ", test_instance["TF"], 
+                    " | ", test_instance["qValue"])) -> p
+  print(p)
+})
+```
+
+# Figure 1e
+
+## From Raw Data
+
+```{r}
+roi <- list("seqname"="chr1", "start"=180924752, "end"=180925152)
+TFs <- c("Oct4", "Sox2", "Nanog", "Klf4")
+df <-
+  purrr::map_dfr(TFs, function(tf) {
+    alignments <- readGAlignments(file.path(data_dir, "chip-nexus", tf, "pool_filt.bam"),
+                                  param = ScanBamParam(which=GRanges(paste0(roi$seqname, ":", roi$start, "-", roi$end))))
+    align_pos <- alignments[strand(alignments)=="+"]
+    align_neg <- alignments[strand(alignments)=="-"]
+
+    align_pos@cigar <- rep("1M", length(align_pos))
+    align_neg@start <- GenomicAlignments::end(align_neg)
+    align_neg@cigar <- rep("1M", length(align_neg))
+
+    tibble::tibble(pos=as.numeric(coverage(align_pos)$chr1[roi$start:roi$end]),
+                   neg=-as.numeric(coverage(align_neg)$chr1[roi$start:roi$end]),
+                   position=roi$start:roi$end,
+                   TF=tf)
+  }) %>%
+  pivot_longer(cols=c("pos", "neg"))
+df
+```
+
+```{r fig.width=8, fig.height=6, cache=FALSE}
+df %>%
+  mutate(TF = factor(TF, levels=c(TFs))) %>%
+  ggplot() +
+  geom_line(aes(x=position, y=value, col=name)) +
+  facet_wrap(~TF, ncol=1, scales="free_y") +
+  labs(x="Position", y="Counts", col="Strand") +
+  ggdark::dark_mode(verbose=FALSE)
+```
+
+## From Processed Data
+
+```{r}
+roi <- list("seqname"="chr1", "start"=180924752, "end"=180925152)
+roi_adjusted <- roi
+roi_adjusted$start = roi_adjusted$start-1000
+roi_adjusted$end = roi_adjusted$end+1000
+
+TFs <- c("Oct4", "Sox2", "Nanog", "Klf4")
+df2 <- 
+  purrr::map_dfr(TFs, function(tf) {
+    cov_list <- list("pos" = tf_counts[[tf]]$test$pos,
+                     "neg" = tf_counts[[tf]]$test$neg)
+    rnames <- seq_names$test
+    gr_rnames <- GRanges(rnames)
+    
+    bool_vec <- 
+      (as.character(gr_rnames@seqnames) == roi_adjusted$seqname &
+      start(gr_rnames@ranges) >= roi_adjusted$start &
+      end(gr_rnames@ranges) <= roi_adjusted$end)
+    
+    peak_index <- which(bool_vec)[1]
+    peak_info <- gr_rnames[peak_index]
+    
+    diff <- 180924752 - start(peak_info@ranges) + 1
+    w <- 400
+    
+    tibble::tibble(pos=cov_list$pos[peak_index, diff:(diff+w)],
+                   neg=-cov_list$neg[peak_index, diff:(diff+w)],
+                   position=0:400,
+                   TF=tf)
+}) %>%
+  pivot_longer(cols=c("pos", "neg"))
+df2
+```
+
+```{r fig.width=8, fig.height=6, cache=FALSE}
+df2 %>%
+  mutate(TF = factor(TF, levels=c(TFs))) %>%
+  ggplot() +
+  geom_line(aes(x=position, y=value, col=name)) +
+  facet_wrap(~TF, ncol=1, scales="free_y") +
+  labs(x="Position", y="Counts", col="Strand") +
+  ggdark::dark_mode(verbose=FALSE)
+```
+
+Compare.
+
+```{r}
+all(df2$value == df$value)
+all(df2$TF == df$TF)
+all(df2$name == df$name)
+```
+
+# Oct4-Sox2 Motif
+
+```{r cache=FALSE}
+motif <- TFBSTools::getMatrixByID(JASPAR2020, ID = "MA0142.1")
+seqLogo::seqLogo(motif@profileMatrix / colSums(motif@profileMatrix))
+```
+
+```{r}
+w = 400
+motif_matches <- motifmatchr::matchMotifs(motif, peak_infos, genome = "mm10", out="position")[[1]] %>%
+  GenomicRanges::resize(width=w, fix="center") %>%
+  plyranges::filter(score > 20.8) %>%
+  plyranges::arrange(score)
+saveRDS(motif_matches, file.path(output_dir, "oct4_sox2_matches.rds"))
+motif_matches
+```
+
+```{r}
+motif_matches_reduced <- GenomicRanges::reduce(resize(motif_matches, GenomicRanges::width(motif_matches + 1), "start"))
+
+### Parallel loop over all tfs
+motif_counts <- c("Oct4", "Sox2") %>%
+  purrr::set_names() %>%
+  furrr::future_map(function(tf) {
+    
+  # read only from the alignment file in the given peak regions
+  # note: make sure that the BAM file is sorted (check for presence of ".bam.bai")
+  alignments <- readGAlignments(file.path(data_dir, "chip-nexus", tf, "pool_filt.bam"),
+                                param = ScanBamParam(which=motif_matches_reduced))
+
+  # split the alignment into pos and neg strand
+  align_pos <- alignments[GenomicRanges::strand(alignments)=="+"]
+  align_neg <- alignments[GenomicRanges::strand(alignments)=="-"]
+
+  # only retain first base pair of each read
+  align_pos@cigar <- rep("1M", length(align_pos))
+  align_neg@start <- GenomicAlignments::end(align_neg)
+  align_neg@cigar <- rep("1M", length(align_neg))
+
+  # compute the coverage per base pair
+  cov_list = list("pos" = GenomicAlignments::coverage(align_pos, weight = 1L),
+                  "neg" = GenomicAlignments::coverage(align_neg, weight = 1L))
+    
+  c("pos", "neg") %>%
+    purrr::set_names() %>%
+    purrr::map(function(strand) {
+          mtx <- matrix(data=0, ncol=w, nrow=length(motif_matches))
+          for (i in 1:length(motif_matches)) {
+            chr <- as.character(motif_matches[i]@seqnames)
+            position_index <- motif_matches[i]@ranges@start:(motif_matches[i]@ranges@start + w - 1)
+            mtx[i, ] = as.numeric(cov_list[[strand]][[chr]][position_index])
+          }
+          mtx
+      })
+  })
+```
+
+Plotting the means per motif as in Figure 1c.
+
+```{r cache=FALSE}
+rbind(
+  tibble(pos = 1:ncol(motif_counts$Oct4$pos),
+         counts_pos = colMeans(motif_counts$Oct4$pos),
+         counts_neg = -colMeans(motif_counts$Oct4$neg),
+         TF = "Oct4"),
+  tibble(pos = 1:ncol(motif_counts$Sox2$pos),
+         counts_pos = colMeans(motif_counts$Sox2$pos),
+         counts_neg = -colMeans(motif_counts$Sox2$neg),
+         TF = "Sox2")
+) %>%
+  ggplot() +
+  geom_line(aes(x=pos, y=counts_pos, color=TF), size=0.5) +
+  geom_line(aes(x=pos, y=counts_neg, color=TF), size=0.5) +
+  scale_color_manual(values=c("Oct4" = "darkred", "Sox2" = "blue")) +
+  labs(x="Position [bp]", y="Coverage", color="TF") +
+  ggdark::dark_mode(verbose=FALSE)
+```
+
+Plot the coverage per motif and per sequence as in Figure 1b
+
+```{r fig.width=4, fig.height=2}
+df <- 
+  purrr::imap_dfr(motif_counts, function(cov, tf) {
+    purrr::imap_dfr(cov, function(mtx, strand) {
+      purrr::map_dfr(1:nrow(mtx), function(i) {
+        tibble::tibble(seq = i,
+                       idx = (-w/2):(w/2 -1),
+                       counts = mtx[i, ],
+                       s = strand,
+                       TF = tf)
+      })
+    })
+  })
+```
+
+Plot via log2 FC at each position
+
+```{r fig.width=4, fig.height=2, cache=FALSE}
+pcount = 1
+df %>%
+  pivot_wider(names_from=s, values_from=counts) %>%
+  dplyr::filter(TF=="Oct4") %>%
+  dplyr::mutate(diff = log2(pos+pcount) - log2(neg+pcount)) %>%
+  ggplot(aes(y=seq, x=idx)) +
+  geom_raster(aes(fill=diff)) +
+  scale_fill_gradient2(low = "blue", mid="black", high="red") +
+  theme_classic() +
+  labs(x = "Relative Postion [bp]", y = "Top Oct4-Sox2 Motifs", fill = "Log2 FC",
+       title="Oct4") +
+  ggdark::dark_mode()
+
+df %>%
+  pivot_wider(names_from=s, values_from=counts) %>%
+  dplyr::filter(TF=="Sox2") %>%
+  dplyr::mutate(diff = log2(pos+pcount) - log2(neg+pcount)) %>%
+  ggplot(aes(y=seq, x=idx)) +
+  geom_raster(aes(fill=diff)) +
+  scale_fill_gradient2(low = "blue", mid="black", high="red") +
+  theme_classic() +
+  labs(x = "Relative Postion [bp]", y = "Top Oct4-Sox2 Motifs", fill = "Log2 FC",
+       title="Sox2") +
+  ggdark::dark_mode()
+```
+
+Plot via facetting
+
+```{r cache=FALSE}
+tf = "Oct4"
+tmp <- df %>%
+  dplyr::filter(TF==tf) %>%
+  dplyr::mutate(counts = ifelse(s=="pos", counts, -counts)) %>%
+  pull(counts)
+df %>%
+  dplyr::filter(TF==tf) %>%
+  dplyr::mutate(counts = ifelse(s=="pos", counts, -counts)) %>%
+  ggplot(aes(y=seq, x=idx)) +
+  geom_raster(aes(fill=counts)) +
+  scale_fill_gradient2(low = "blue", mid="black", high="red") +
+  scale_fill_gradientn(colours = c("red", "black", "blue"),
+                       values = scales::rescale(c(max(tmp), 5, 0, -5, min(tmp)))) +
+  theme_classic() +
+  labs(x = "Relative Postion [bp]", y = "Top Oct4-Sox2 Motifs", fill = "Log2 FC",
+       title=tf) +
+  ggdark::dark_mode() +
+  facet_wrap(~s, ncol=1)
+```
+
+```{r cache=FALSE}
+tf = "Sox2"
+tmp <- df %>%
+  dplyr::filter(TF==tf) %>%
+  dplyr::mutate(counts = ifelse(s=="pos", counts, -counts)) %>%
+  pull(counts)
+df %>%
+  dplyr::filter(TF==tf) %>%
+  dplyr::mutate(counts = ifelse(s=="pos", counts, -counts)) %>%
+  ggplot(aes(y=seq, x=idx)) +
+  geom_raster(aes(fill=counts)) +
+  scale_fill_gradient2(low = "blue", mid="black", high="red") +
+  scale_fill_gradientn(colours = c("red", "black", "blue"),
+                       values = scales::rescale(c(max(tmp), 5, 0, -5, min(tmp)))) +
+  theme_classic() +
+  labs(x = "Relative Postion [bp]", y = "Top Oct4-Sox2 Motifs", fill = "Log2 FC",
+       title=tf) +
+  ggdark::dark_mode() +
+  facet_wrap(~s, ncol=1)
+```
+
+# Appendix
+
+## Save Image
+
+```{r}
+save.image(file.path(output_dir, "tmp.RData"))
+```
+
+## Session Info
+
+```{r}
+sessionInfo()
+```
+

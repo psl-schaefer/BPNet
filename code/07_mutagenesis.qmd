@@ -1,0 +1,450 @@
+---
+title: "Mutagenesis"
+jupyter: py-env-bpnet
+execute:
+  freeze: auto
+---
+
+# Description
+
+- Here we perform in-silico mutagenesis experiments
+
+# Libraries
+
+```{python}
+from pathlib import Path
+import matplotlib.pyplot as plt
+plt.style.use('dark_background')
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from src.architectures import *
+from src.utils import * 
+from src.loss import *
+from src.metrics import *
+from src.DeepLiftUtils import *
+from captum.attr import DeepLift
+import seaborn as sns
+from matplotlib import pyplot as plt
+import modisco.visualization
+from modisco.visualization import viz_sequence
+```
+
+# Data
+
+```{python}
+TF_LIST = ["Nanog", "Klf4", "Oct4", "Sox2"]
+BATCH_SIZE = 64
+PRC_DIR = Path("..") / "prc"
+FIG_DIR = Path("..") / "figures" / "mutagenesis"
+FIG_DIR.mkdir(exist_ok=True, parents=True)
+```
+
+```{python}
+if torch.cuda.is_available():
+  device = "cuda"
+elif torch.backends.mps.is_available():
+  device = torch.device("mps")
+else:
+  decive = "cpu"
+print(f"Using {device} device")
+```
+
+```{python}
+train_dataset = ChIP_Nexus_Dataset(set_name="train", 
+                                   input_dir=PRC_DIR, 
+                                   TF_list=TF_LIST)
+train_dataset
+```
+
+
+```{python}
+tune_dataset = ChIP_Nexus_Dataset(set_name="tune", 
+                                  input_dir=PRC_DIR, 
+                                  TF_list=TF_LIST)
+tune_dataset
+```
+
+
+```{python}
+test_dataset = ChIP_Nexus_Dataset(set_name="test", 
+                                  input_dir=PRC_DIR, 
+                                  TF_list=TF_LIST)
+test_dataset
+```
+
+```{python}
+model = torch.load("../trained_models/all_tfs_model.pt")
+```
+
+```{python}
+dl = DeepLift(model)
+
+```
+
+```{python}
+seqname = "chr15"
+start = 80618982
+end = 80619381
+length = end - start
+```
+
+```{python}
+center = start + 200
+
+a = start + 193
+b = end - 192
+print(a, b, b-a)
+```
+
+```{python}
+def remove_motif(seqname, start, end, dataset, dl, tf_list, device, output_dir, suffix, plot=True, extend_left=23, extend_right=23, figsize1=(20,2), figsize2=(10,2)):
+  # select sequence of interest
+  tmp_df, idx, dist_start, one_hot, baseline, bias_raw, bias_smooth, tf_counts = get_seq_oi(seqname, start, end, dataset, device)
+  width = end - start
+  center = start + 200
+
+  #shuffle region of interest
+  mut_one_hot = one_hot.clone().cpu().numpy()
+  roi = mutate_sequence(mut_one_hot[:,:, dist_start:dist_start+width])
+  # insert shuffled region back in 
+  mut_one_hot[:, :, dist_start:dist_start+end-start] = roi
+  mut_one_hot = torch.tensor(mut_one_hot).to(device)
+  assert torch.all(one_hot == mut_one_hot) == False
+
+  contr_list = []
+  plot_df = pd.DataFrame(columns=["pos", "TF", "pos_values", "neg_values"])
+  for tf_index, tf in enumerate(TF_LIST):
+    # compute contribution scores on original and mutated strand
+    contr = dl.attribute(inputs=one_hot, baselines=baseline, target=tf_index, 
+            additional_forward_args=(bias_raw, bias_smooth, True)).detach().cpu().numpy()
+    mut_contr = dl.attribute(inputs=mut_one_hot, baselines = baseline, target=tf_index,
+            additional_forward_args=(bias_raw, bias_smooth, True)).detach().cpu().numpy()
+
+    # make predictions on original and mutated strand
+    pred, _ = model.forward(one_hot, bias_raw, bias_smooth, interpretation=False)
+    pred = pred.detach().cpu().numpy().squeeze()
+    mut_pred,_ = model.forward(mut_one_hot, bias_raw, bias_smooth, interpretation=False)
+    mut_pred = mut_pred.detach().cpu().numpy().squeeze()
+
+    # scale predictions with tf_counts for plotting
+    #  print(pred.shape, tf_counts.shape)
+    pred = pred * tf_counts.sum(axis=-1, keepdims=True)
+    mut_pred = mut_pred * tf_counts.sum(axis=-1, keepdims=True)
+
+    tf_df = pd.DataFrame({"pos": np.arange(1000), "TF": tf, "pos_values": pred[tf_index, 0,:], "neg_values": pred[tf_index, 1,:], "mut_pos_values" : mut_pred[tf_index, 0, :], "mut_neg_values" : mut_pred[tf_index, 1,:], "tf_counts_pos": tf_counts[tf_index, 0, :], "tf_counts_neg": tf_counts[tf_index, 1, :]})
+    plot_df = plot_df.append(tf_df)
+
+    if plot:
+      plot_weights(contr,
+      fontsizes=[20,15,15],
+      title = f"{tf} - Original sequence", 
+      xlabel=f"{tmp_df.seqnames[idx]}: {tmp_df.start[idx]}-{tmp_df.end[idx]}", 
+      ylabel="DeepLift contribution scores",
+      subticks_frequency=20, figsize=figsize1)
+
+      # zoomed into motif region
+      plot_weights(contr[:, :,dist_start-extend_left : (dist_start + width + extend_right)],
+      fontsizes=[20,15,15],
+      title = f"{tf} - Original motif", 
+      xlabel=f"{seqname}: {start}-{end}",#, ({dist_start} - {dist_start + width})", 
+      ylabel="DeepLift contribution scores",
+      subticks_frequency=10, figsize=figsize2)
+      plt.savefig(f"{output_dir}{tf}_{seqname}_{start}_{end}_original_{suffix}.pdf")  
+
+      # entire mutated sequence
+      plot_weights(mut_contr,
+      fontsizes=[20,15,15],
+      title = f"{tf} - Mutated sequence", 
+      xlabel=f"{tmp_df.seqnames[idx]}: {tmp_df.start[idx]}-{tmp_df.end[idx]}", 
+      ylabel="DeepLift contribution scores",
+      subticks_frequency=20, figsize=figsize1)
+
+      # zoomed in mutated sequence
+      plot_weights(mut_contr[:, :,dist_start-extend_left : (dist_start + width + extend_right)],
+      fontsizes=[20,15,15],
+      title = f"{tf} - Mutated motif", 
+      xlabel=f"{seqname}: {start}-{end}",#, ({dist_start} - {dist_start + width})", 
+      ylabel="DeepLift contribution scores",
+      subticks_frequency=10, figsize=figsize2)
+      plt.savefig(f"{output_dir}{tf}_{seqname}_{start}_{end}_mutated_{suffix}.pdf")  
+      
+      #fig = plt.figure(figsize=(10,4))
+      plt.plot(-tf_counts[tf_index, 1, :], color="green", linewidth=0.8)
+      plt.plot()
+      fig, axis = plt.subplots(2,1,figsize=(10,8))
+      axis[0].plot(tf_counts[tf_index, 0, :], label="true counts", color="green", linewidth=0.8)
+      axis[0].plot(-tf_counts[tf_index, 1, :], color="green", linewidth=0.8)
+      axis[0].plot(pred[tf_index, 0, :], label="pred", color="blue", linewidth=0.8)
+      axis[0].plot(-pred[tf_index, 1, :], color="blue", linewidth=0.8)   
+      axis[0].set_xlabel("bp")
+      axis[0].set_ylabel("Read counts")
+      axis[1].plot(tf_counts[tf_index, 1, :], color="green", linewidth=0.8)
+      axis[1].plot(-tf_counts[tf_index, 1, :], color="green", linewidth=0.8)
+      axis[1].plot(mut_pred[tf_index, 0, :], label="pred mutated strand", color="darkred", linewidth=0.8)
+      axis[1].plot(-mut_pred[tf_index, 1, :], color="darkred", linewidth=0.8)      
+      axis[1].set_xlabel("bp")
+      axis[0].legend()
+      axis[1].legend()
+      plt.show()
+
+  return contr, mut_contr, dist_start, plot_df
+```
+
+# Remove entire motif
+
+```{python}
+_, _, dist_start, plot_df = remove_motif(seqname, start=a, end=b, dataset=train_dataset,  dl=dl, suffix="remove", output_dir=OUTPUT_DIR, tf_list=TF_LIST, device=device, figsize1=(30,2), figsize2=(10,1.5))
+plot_df.to_csv("/home/kathi/AML_Project/data/remove_motif.csv")
+```
+
+```{r}
+library(tidyverse)
+output_dir = "/home/kathi/AML_Project/data/mutation_figures/"
+colors = c("Oct4" = "#CD5C5C",
+           "Sox2" = "#849EEB",
+           "Nanog" = "#FFE03F",
+           "Klf4" = "#92C592",
+           "patchcap" = "#827F81")
+df = read.csv("/home/kathi/AML_Project/data/remove_motif.csv")
+df %>%
+  ggplot() +
+  geom_line(aes(x=pos, y=tf_counts_pos, col="black"))+#, alpha=0.8)) +
+  geom_line(aes(x=pos, y=-tf_counts_neg, col="black"))+#, alpha=0.8)) +
+  geom_line(aes(x=pos, y=pos_values, col=TF), size=.7) +
+  geom_line(aes(x=pos, y=-neg_values, col=TF), size=.7) +
+  facet_wrap(~TF, ncol=1, scales="free_y") +
+  labs(x="Position", y="Counts", col="Strand") +
+  scale_color_manual(values=colors) + 
+  #scale_alpha_manual(values=c("pos" = 1, "neg" = 1)) +
+  theme_bw()
+ggsave(paste0(output_dir, "chr4_55475545_55475604_remove_pred.pdf"))
+
+df %>%
+  ggplot() +
+  geom_line(aes(x=pos, y=tf_counts_pos, col="black"))+#, alpha=0.8)) +
+  geom_line(aes(x=pos, y=-tf_counts_neg, col="black"))+#, alpha=0.8)) +
+  geom_line(aes(x=pos, y=mut_pos_values, col=TF), size=.7) +
+  geom_line(aes(x=pos, y=-mut_neg_values, col=TF), size=.7) +
+  facet_wrap(~TF, ncol=1, scales="free_y") +
+  labs(x="Position", y="Counts", col="Strand") +
+  scale_color_manual(values=colors) + 
+  #scale_alpha_manual(values=c("pos" = 1, "neg" = 1)) +
+  theme_bw()
+ggsave(paste0(output_dir, "chr4_55475545_55475604_remove_mutpred.pdf"))
+  #ggdark::dark_theme_linedraw()
+#ggsave(paste0(output_dir, "chr4_55475545_55475604_zoomed_traces.pdf"))
+```
+
+# Remove Oct4 part
+```{python}
+_, _, dist_start, plot_df = remove_motif(seqname, start=a, end=a+8, dataset=train_dataset, suffix="remove_oct4", output_dir=OUTPUT_DIR,  dl=dl, tf_list=TF_LIST, device=device, extend_left=23, extend_right=23+6, figsize1=(30,2), figsize2=(10, 1.5))
+plot_df.to_csv("/home/kathi/AML_Project/data/remove_oct4.csv")
+
+```
+
+```{r}
+library(tidyverse)
+output_dir = "/home/kathi/AML_Project/data/mutation_figures/"
+colors = c("Oct4" = "#CD5C5C",
+           "Sox2" = "#849EEB",
+           "Nanog" = "#FFE03F",
+           "Klf4" = "#92C592",
+           "patchcap" = "#827F81")
+df = read.csv("/home/kathi/AML_Project/data/remove_oct4.csv")
+df %>%
+  ggplot() +
+  geom_line(aes(x=pos, y=tf_counts_pos, col="black"))+#, alpha=0.8)) +
+  geom_line(aes(x=pos, y=-tf_counts_neg, col="black"))+#, alpha=0.8)) +
+  geom_line(aes(x=pos, y=pos_values, col=TF), size=.7) +
+  geom_line(aes(x=pos, y=-neg_values, col=TF), size=.7) +
+  facet_wrap(~TF, ncol=1, scales="free_y") +
+  labs(x="Position", y="Counts", col="Strand") +
+  scale_color_manual(values=colors) + 
+  #scale_alpha_manual(values=c("pos" = 1, "neg" = 1)) +
+  theme_bw()
+ggsave(paste0(output_dir, "chr4_55475545_55475604_remove_oct4_pred.pdf"))
+
+df %>%
+  ggplot() +
+  geom_line(aes(x=pos, y=tf_counts_pos, col="black"))+#, alpha=0.8)) +
+  geom_line(aes(x=pos, y=-tf_counts_neg, col="black"))+#, alpha=0.8)) +
+  geom_line(aes(x=pos, y=mut_pos_values, col=TF), size=.7) +
+  geom_line(aes(x=pos, y=-mut_neg_values, col=TF), size=.7) +
+  facet_wrap(~TF, ncol=1, scales="free_y") +
+  labs(x="Position", y="Counts", col="Strand") +
+  scale_color_manual(values=colors) + 
+  #scale_alpha_manual(values=c("pos" = 1, "neg" = 1)) +
+  theme_bw()
+ggsave(paste0(output_dir, "chr4_55475545_55475604_remove_oct4_mutpred.pdf"))
+  #ggdark::dark_theme_linedraw()
+#ggsave(paste0(output_dir, "chr4_55475545_55475604_zoomed_traces.pdf"))
+```
+
+# Remove Sox2 part
+
+```{python}
+_, _, dist_start, plot_df = remove_motif(seqname, start=a+8, end=b, dataset=train_dataset,  suffix="remove_sox2", output_dir=OUTPUT_DIR, dl=dl, tf_list=TF_LIST, device=device, figsize1=(30,2), figsize2=(10,1.5))
+plot_df.to_csv("/home/kathi/AML_Project/data/remove_sox2.csv")
+
+```
+
+```{r}
+library(tidyverse)
+output_dir = "/home/kathi/AML_Project/data/mutation_figures/"
+colors = c("Oct4" = "#CD5C5C",
+           "Sox2" = "#849EEB",
+           "Nanog" = "#FFE03F",
+           "Klf4" = "#92C592",
+           "patchcap" = "#827F81")
+df = read.csv("/home/kathi/AML_Project/data/remove_sox2.csv")
+df %>%
+  ggplot() +
+  geom_line(aes(x=pos, y=tf_counts_pos, col="black"))+#, alpha=0.8)) +
+  geom_line(aes(x=pos, y=-tf_counts_neg, col="black"))+#, alpha=0.8)) +
+  geom_line(aes(x=pos, y=pos_values, col=TF), size=.7) +
+  geom_line(aes(x=pos, y=-neg_values, col=TF), size=.7) +
+  facet_wrap(~TF, ncol=1, scales="free_y") +
+  labs(x="Position", y="Counts", col="Strand") +
+  scale_color_manual(values=colors) + 
+  #scale_alpha_manual(values=c("pos" = 1, "neg" = 1)) +
+  theme_bw()
+ggsave(paste0(output_dir, "chr4_55475545_55475604_remove_sox2_pred.pdf"))
+
+df %>%
+  ggplot() +
+  geom_line(aes(x=pos, y=tf_counts_pos, col="black"))+#, alpha=0.8)) +
+  geom_line(aes(x=pos, y=-tf_counts_neg, col="black"))+#, alpha=0.8)) +
+  geom_line(aes(x=pos, y=mut_pos_values, col=TF), size=.7) +
+  geom_line(aes(x=pos, y=-mut_neg_values, col=TF), size=.7) +
+  facet_wrap(~TF, ncol=1, scales="free_y") +
+  labs(x="Position", y="Counts", col="Strand") +
+  scale_color_manual(values=colors) + 
+  #scale_alpha_manual(values=c("pos" = 1, "neg" = 1)) +
+  theme_bw()
+ggsave(paste0(output_dir, "chr4_55475545_55475604_remove_sox2_mutpred.pdf"))
+  #ggdark::dark_theme_linedraw()
+#ggsave(paste0(output_dir, "chr4_55475545_55475604_zoomed_traces.pdf"))
+```
+
+# Move Sox2 part somewhere else
+
+```{python}
+# here I move the second motif(Sox2) d bps to the right
+def move_motifs_apart(seqname, start, end, dataset, DeepLiftModel, distance, plot=True, figsize1=(20,2), figsize2=(10,2)):
+  # select sequence of interest
+  tmp_df, idx, dist_start, one_hot, baseline, bias_raw, bias_smooth, tf_counts = get_seq_oi(seqname, start, end, dataset, device)
+  width = end - start
+
+  #shuffle region of interest
+  mut_one_hot = one_hot.clone().cpu().numpy()
+  roi = mutate_sequence(mut_one_hot[:, :, dist_start:dist_start+width])
+  mut_one_hot[:, :, dist_start:dist_start+end-start] = roi
+  # add motif at new location 10kb to the right
+  mut_one_hot[:, :, dist_start+distance:dist_start+width+distance] = one_hot[:, :, dist_start:dist_start+width].detach().cpu().numpy()
+  print(f"New location of motif at: {distance} - {distance+width}")
+  mut_one_hot = torch.tensor(mut_one_hot).to(device)
+  assert torch.all(one_hot == mut_one_hot) == False
+
+
+  contr_list = []
+  for tf_index, tf in enumerate(TF_LIST):
+    # compute contribution scores on original and mutated strand
+    contr = dl.attribute(inputs=one_hot, baselines=baseline, target=tf_index, additional_forward_args=(bias_raw, bias_smooth, True)).detach().cpu().numpy()
+    mut_contr = dl.attribute(inputs=mut_one_hot, baselines = baseline, target=tf_index, additional_forward_args=(bias_raw, bias_smooth, True)).detach().cpu().numpy()
+
+    # make predictions on original and mutated strand
+    pred, _ = model.forward(one_hot, bias_raw, bias_smooth, interpretation=False)
+    pred = pred.detach().cpu().numpy().squeeze()
+    mut_pred,_ = model.forward(mut_one_hot, bias_raw, bias_smooth, interpretation=False)
+    mut_pred = mut_pred.detach().cpu().numpy().squeeze()
+
+    # scale predictions with tf_counts for plotting
+    pred = pred * tf_counts.sum(axis=-1, keepdims=True)
+    mut_pred = mut_pred * tf_counts.sum(axis=-1, keepdims=True)
+    if plot:
+      plot_weights(contr,
+      fontsizes=[20,15,15],
+      title = f"{tf} - Original sequence", 
+      xlabel=f"{tmp_df.seqnames[idx]}: {tmp_df.start[idx]}-{tmp_df.end[idx]}", 
+      ylabel="DeepLift contribution scores",
+      subticks_frequency=20, figsize=figsize1)
+
+      # zoomed into motif region
+      plot_weights(contr[:, :,dist_start : (dist_start + width)],
+      fontsizes=[20,15,15],
+      title = f"{tf} - Original motif", 
+      xlabel=f"{seqname}: {start}-{end}, ({dist_start} - {dist_start + width})", 
+      ylabel="DeepLift contribution scores",
+      subticks_frequency=1, figsize=figsize2)
+
+      # entire mutated sequence
+      plot_weights(mut_contr,
+      fontsizes=[20,15,15],
+      title = f"{tf} - Motif moved to {distance} - {distance+width}", 
+      xlabel=f"{tmp_df.seqnames[idx]}: {tmp_df.start[idx]}-{tmp_df.end[idx]}", 
+      ylabel="DeepLift contribution scores",
+      subticks_frequency=20, figsize=figsize1)
+
+      # zoomed in mutated sequence
+      plot_weights(mut_contr[:, :,dist_start : (dist_start + width)],
+      fontsizes=[20,15,15],
+      title = f"{tf} - Mutated motif", 
+      xlabel=f"{seqname}: {start}-{end}, ({dist_start} - {dist_start + width})", 
+      ylabel="DeepLift contribution scores",
+      subticks_frequency=1, figsize=figsize2)
+
+      # zoomed in new location of motif
+      # zoomed in mutated sequence
+      plot_weights(mut_contr[:, :,dist_start+distance:dist_start+width+distance],
+      fontsizes=[20,15,15],
+      title = f"{tf} - Motif at new position", 
+      xlabel=f"{seqname}: {start+distance}-{end+distance}, ({dist_start+distance} - {dist_start+distance + width})", 
+      ylabel="DeepLift contribution scores",
+      subticks_frequency=1, figsize=figsize2)
+
+
+      #viz_sequence.plot_weights(contr.detach().cpu().numpy(), subticks_frequency=10, figsize=(25, 2))
+      #print(f"coordinates: {seqname}:{start}-{end}, ({dist_start} - {dist_start + end - start})")
+      #viz_sequence.plot_weights(contr.detach().cpu().numpy()[:, :,dist_start : (dist_start + end - start)], subticks_frequency=5, figsize=(10,2)) 
+      #print(f"motif moved:")
+      #viz_sequence.plot_weights(mut_contr.detach().cpu().numpy(), subticks_frequency=10, figsize=(25, 2))
+      #print(f"coordinates: {seqname}:{start}-{end}, ({dist_start} - {dist_start + end - start})")
+      #viz_sequence.plot_weights(mut_contr.detach().cpu().numpy()[:, :,dist_start : (dist_start + end - start)], subticks_frequency=5, figsize=(10,2)) 
+
+      fig, axis = plt.subplots(2,2,figsize=(12,12))
+      axis[0, 0].plot(tf_counts[tf_index, 0, :], label="true counts", color="green", linewidth=0.8)
+      axis[0, 0].plot(-tf_counts[tf_index, 1, :], color="green", linewidth=0.8)
+      axis[0, 0].plot(pred[tf_index, 0, :], label="pred", color="blue", linewidth=0.8)
+      axis[0, 0].plot(-pred[tf_index, 1, :], color="blue", linewidth=0.8)   
+      axis[0, 0].set_xlabel("bp")
+      axis[0, 0].set_ylabel("Read counts")
+      axis[0, 1].plot(pred[tf_index, 0, :], label="pred", color="blue", linewidth=0.8)
+      axis[0, 1].plot(-pred[tf_index, 1, :], color="blue", linewidth=0.8)
+      axis[0, 1].set_xlabel("bp")
+      axis[0, 1].set_ylabel("Predicted probabilitiy * total counts")
+      axis[1, 0].plot(tf_counts[tf_index, 0, :], label="true counts", color="green", linewidth=0.8)
+      axis[1, 0].plot(-tf_counts[tf_index, 1, :], color="green", linewidth=0.8)
+      axis[1, 0].plot(mut_pred[tf_index, 0, :], label="pred mutated strand", color="darkred", linewidth=0.8)
+      axis[1, 0].plot(-mut_pred[tf_index, 1, :], color="darkred", linewidth=0.8)      
+      axis[1, 0].set_xlabel("bp")
+      axis[1, 0].set_ylabel("Read counts")
+      axis[1, 1].plot(mut_pred[tf_index, 0, :], label="pred mutated strand", color="darkred", linewidth=0.8)
+      axis[1, 1].plot(-mut_pred[tf_index, 1, :], color="darkred", linewidth=0.8)
+      axis[1, 1].set_xlabel("bp")
+      axis[1, 1].set_ylabel("Predicted probabilitiy * total counts")
+      axis[0, 0].legend()
+      axis[1, 0].legend()
+      axis[0, 1].legend()
+      axis[1,1].legend()
+      plt.show()
+
+
+  return contr, mut_contr, dist_start
+```
+
+```{python}
+x, y, dist_start = move_motifs_apart(seqname, a+8, b, train_dataset, dl, 10, plot=True)
+```

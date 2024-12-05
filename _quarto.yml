@@ -1,0 +1,62 @@
+project:
+  type: website
+  output-dir: docs
+  render:
+  - "index.qmd" 
+  - "code/00_introduction.qmd"
+  - "code/01_download.qmd"
+  - "code/02_prepare_input.qmd"
+  - "code/03_APIs.qmd"
+  #- "*.qmd"
+  #- "!tmp/"
+  #- "!archived/"
+  #- "!testing.qmd"
+  
+bibliography: ref.bib
+
+website:
+  title: "PSLS @ BPNet"
+  navbar:
+    right:
+      - text: "Home"
+        href: index.qmd
+      - icon: github
+        href: https://github.com/psl-schaefer/BPNet
+      - icon: twitter
+        href: https://x.com/psl_schaefer
+      - icon: linkedin
+        href: https://www.linkedin.com/in/philipp-sl-schaefer/
+    left:
+      - href: 00_introduction.qmd
+        text: Introduction
+      - href: 01_download.qmd
+        text: Download
+      - href: 02_prepare_input.qmd
+        text: Processing
+      - href: 03_APIs.qmd
+        text: APIs
+      - href: 04_training.qmd
+        text: Training
+      - href: 05_architecture_comparison.qmd
+        text: Architectures
+      - href: 06_interpretability.qmd
+        text: Interpretability
+      - href: 07_mutagenesis.qmd
+        text: Mutagenesis
+
+format:
+  html:
+    html-math-method: mathjax
+    theme: darkly
+    css: styles.css
+    toc: true
+    toc-float: yes
+    toc-depth: 3
+    toc-expand: 1
+    toc-location: right
+    number-sections: true
+    df-print: paged
+    code-tools: true
+    code-fold: true
+    code-overflow: scroll
+    

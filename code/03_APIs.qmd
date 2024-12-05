@@ -1,0 +1,243 @@
+---
+title: "Dataset and NN Architecture API"
+jupyter: py-env-bpnet
+execute:
+  freeze: auto
+---
+
+# Description
+
+- Here we document our dataset API as well as our neural network architecture API
+
+# Libraries
+
+```{python}
+from pathlib import Path
+import numpy as np
+import matplotlib.pyplot as plt
+plt.style.use('dark_background')
+import seaborn as sns
+import pandas as pd
+import re
+import torch
+from torch.utils.data import Dataset, DataLoader
+from src.utils import ChIP_Nexus_Dataset
+from src.architectures import BPNet
+```
+
+# Dataset API
+
+```{python}
+DATA_DIR = Path("..") / "data"
+PRC_DIR = Path("..") / "prc"
+```
+
+## Example 1: Create Train Dataset for all TFs
+
+One has to provide the set which must be one of "train", "tune", "test" as well as the input directory and the list of TFs one wants to model.
+
+```{python}
+whole_dataset = ChIP_Nexus_Dataset(set_name="train", 
+                                   input_dir=PRC_DIR, 
+                                   TF_list=['Sox2', 'Oct4', 'Klf4', 'Nanog'])
+whole_dataset
+```
+
+Check the shapes via the `check_shapes()` method.
+
+```{python}
+whole_dataset.check_shapes()
+```
+
+## Example 2: Create Train Dataset for Sox2 
+
+If we only want to take one or a few TFs into consideration we can specify which ones using the `TF_list` parameter. The constructor method will take care of everything and only keep the peaks that are specific to the TFs in the `TF_list`.
+
+```{python}
+small_dataset = ChIP_Nexus_Dataset(set_name="train", 
+                                   input_dir=PRC_DIR, 
+                                   TF_list=['Sox2'])
+small_dataset
+```
+
+```{python}
+small_dataset.check_shapes()
+```
+
+## Example 3: Create Train Dataset for Sox2 and High-Confidence Peaks
+
+We might also want to filter peaks based on the qValue.
+
+```{python}
+cutoff = 4.5
+sns.histplot(np.log2(small_dataset.region_info.qValue))
+plt.xlabel("Log2 qValue")
+plt.title("Distribution of qValues")
+plt.axvline(cutoff, color="red")
+plt.show()
+```
+
+Looking at the histogram of the log2 qValue, we might decide to only keep peaks with a log2 qValue above 4.5.
+
+```{python}
+highconf_dataset = ChIP_Nexus_Dataset(set_name="train", 
+                                      input_dir=PRC_DIR, 
+                                      TF_list=["Sox2"],
+                                      qval_thr=2**cutoff)
+highconf_dataset
+```
+
+```{python}
+highconf_dataset.check_shapes()
+```
+
+## Example 4: Create Train Dataset for Sox2 but keep all Regions
+
+Now we might also want to create a training set that contains all the regions but only the counts for Sox2.
+
+```{python}
+sox2_all_regions = ChIP_Nexus_Dataset(set_name="train", 
+                                      input_dir=PRC_DIR, 
+                                      TF_list=["Sox2"], 
+                                      subset=False)
+sox2_all_regions
+```
+
+```{python}
+sox2_all_regions.check_shapes()
+```
+
+# Architecture API
+
+## Example 1: One TF, Shape Prediction, No Bias Track
+
+```{python}
+model_1 = BPNet(n_dil_layers=9, TF_list=["Sox2"], 
+                pred_total=False, bias_track=False)
+model_1
+```
+
+## Example 2: One TF, Shape & Total Counts Prediction, No Bias Track
+
+```{python}
+model_2 = BPNet(n_dil_layers=9, TF_list=["Sox2"], pred_total=True, bias_track=False)
+model_2
+```
+
+## Example 3: One TF, Shape & Total Counts Prediction, Bias
+
+```{python}
+model_3 = BPNet(n_dil_layers=9, TF_list=["Sox2"], pred_total=True, bias_track=True)
+model_3
+```
+
+Features bias weights.
+
+```{python}
+model_3.profile_heads[0].bias_weights
+```
+
+## Example 4: All TFs, Shape & Total Counts Prediction, Bias
+
+```{python}
+model_4 = BPNet(n_dil_layers=9, TF_list=["Sox2", "Oct4", "Nanog", "Klf4"], pred_total=True, bias_track=True)
+model_4
+```
+
+# Appendix
+
+## Recreate Figure 1 e
+
+```{python}
+test_dataset = ChIP_Nexus_Dataset(set_name="test", 
+                                  input_dir=PRC_DIR, 
+                                  TF_list=['Oct4', 'Sox2', 'Nanog', 'Klf4'])
+test_dataset
+```
+
+```{python}
+tmp_df = test_dataset.region_info.copy().reset_index()
+idx = tmp_df.loc[(tmp_df.seqnames=="chr1") & (tmp_df.start > 180924752-1000) & (tmp_df.end < 180925152+1000)].index.to_numpy()[0]
+
+diff = 180924752 - tmp_df.start[idx] + 1
+w = 400
+
+fig, axis = plt.subplots(4, 1, figsize=(6, 14))
+
+for ax, (i, tf) in zip(axis, enumerate(test_dataset.tf_list)):
+  ax.plot(test_dataset.tf_counts[idx, i, 0, diff:(diff+w)], label="pos")
+  ax.plot(-test_dataset.tf_counts[idx, i, 1, diff:(diff+w)], label="neg")
+  ax.legend()
+  ax.set_title(tf)
+plt.show()
+```
+
+## Check One-Hot Encoding
+
+To check whether the one-hot encoding worked as expected, we compare here:
+
+1) The one-hot encoded sequence as stored in the test dataset
+
+```{python}
+plt.imshow(test_dataset.one_hot_seqs[idx, :, diff:(diff+w)], interpolation="none", aspect="auto")
+plt.title("One-Hot Encoding from Test Dataset")
+plt.yticks([0, 1, 2, 3], labels=["A", "C", "G", "T"])
+plt.show()
+```
+
+2) The one-hot encoded sequence obtained from reading in the mm10 genome and one-hot encoding corresponding sequence
+
+```{python}
+#from Bio.Seq import Seq
+#from Bio import SeqIO
+#mm10_ref = SeqIO.to_dict(SeqIO.parse(DATA_DIR / "mm10.fa", "fasta"))
+#seq = mm10_ref[tmp_df.iloc[idx]["seqnames"]][180924752:180925152]
+#one_hot_seq = np.zeros((4, 400))
+#for i, letter in enumerate(np.array(seq.seq)):
+#  if letter=="A": one_hot_seq[0, i] = 1
+#  if letter=="C": one_hot_seq[1, i] = 1
+#  if letter=="G": one_hot_seq[2, i] = 1
+#  if letter=="T": one_hot_seq[3, i] = 1
+#plt.imshow(one_hot_seq, interpolation="none", aspect="auto")
+#plt.yticks([0, 1, 2, 3], labels=["A", "C", "G", "T"])
+#plt.title("One-Hot Encoding based on Reference Sequence")
+#plt.show()
+```
+
+```{python}
+import gzip
+from Bio.Seq import Seq
+from Bio import SeqIO
+import numpy as np
+import matplotlib.pyplot as plt
+
+data_dir = Path("..") / "data"
+mm10_path = data_dir / "mm10.fa.gz"
+
+# Parse the gzipped file on-the-fly
+with gzip.open(mm10_path, "rt") as handle:
+    mm10_ref = SeqIO.to_dict(SeqIO.parse(handle, "fasta"))
+seq = mm10_ref[tmp_df["seqnames"][idx]].seq[180924752:180925152]
+
+one_hot_seq = np.zeros((4, len(seq)))
+for i, letter in enumerate(seq):
+    if letter == "A": one_hot_seq[0, i] = 1
+    elif letter == "C": one_hot_seq[1, i] = 1
+    elif letter == "G": one_hot_seq[2, i] = 1
+    elif letter == "T": one_hot_seq[3, i] = 1
+
+plt.imshow(one_hot_seq, interpolation="none", aspect="auto")
+plt.yticks([0, 1, 2, 3], labels=["A", "C", "G", "T"])
+plt.title("One-Hot Encoding based on Reference Sequence")
+plt.xlabel("Position")
+plt.ylabel("Base")
+plt.show()
+```
+
+for the peak seen in Figure 1e
+
+```{python}
+np.all(test_dataset.one_hot_seqs[idx, :, diff:(diff+w)] == one_hot_seq)
+```
+
+And we see that we get exactly the same.

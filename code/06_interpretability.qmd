@@ -1,0 +1,231 @@
+---
+title: "Interpretability"
+jupyter: py-env-bpnet
+execute:
+  freeze: auto
+---
+
+# Description
+
+- Here we use Interpretable ML tools to make sense of the model predictions.
+
+# Libraries
+
+```{python}
+from pathlib import Path
+import matplotlib.pyplot as plt
+plt.style.use('dark_background')
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from src.architectures import *
+from src.utils import * 
+from src.loss import *
+from src.metrics import *
+from src.DeepLiftUtils import *
+from captum.attr import DeepLift
+import seaborn as sns
+from matplotlib import pyplot as plt
+import modisco.visualization
+from modisco.visualization import viz_sequence
+```
+
+# Data
+
+```{python}
+TF_LIST = ["Nanog", "Klf4", "Oct4", "Sox2"]
+BATCH_SIZE = 64
+PRC_DIR = Path("..") / "prc"
+FIG_DIR = Path("..") / "figures" / "interpretability"
+FIG_DIR.mkdir(exist_ok=True, parents=True)
+```
+
+```{python}
+if torch.cuda.is_available():
+  device = "cuda"
+elif torch.backends.mps.is_available():
+  device = torch.device("mps")
+else:
+  decive = "cpu"
+print(f"Using {device} device")
+```
+
+```{python}
+train_dataset = ChIP_Nexus_Dataset(set_name="train", 
+                                   input_dir=PRC_DIR, 
+                                   TF_list=TF_LIST)
+train_dataset
+```
+
+```{python}
+tune_dataset = ChIP_Nexus_Dataset(set_name="tune", 
+                                  input_dir=PRC_DIR, 
+                                  TF_list=TF_LIST)
+tune_dataset
+```
+
+```{python}
+test_dataset = ChIP_Nexus_Dataset(set_name="test", 
+                                  input_dir=PRC_DIR, 
+                                  TF_list=TF_LIST)
+test_dataset
+```
+
+For interpretability methods like DeepLift (https://github.com/kundajelab/deeplift), integrated gradients or gradient x input, we require a scalar output. The BPNet model does, however, predict profiles shapes as tensors of size 2 x 1000 (strand x bps). For backpropagation or DeepLift we collapse the profile for each strand to one representative value, which can then be used to compute the gradient of this scalar with respect to each of the input bps. 
+
+We define our profile prediction as the softmax of the pre-activation of the last layer in our profile shape prediction head.
+
+$\tilde{z}$ is the pre-activation of our last layer.
+
+$p = softmax(\tilde{z}) = \frac{\exp{\tilde{z}}}{\sum_{i}^{N}{\exp{\tilde{z'}_i}}}$ with $N$ corresponding to the number of bps.
+
+We weight the pre-activations of the last layer with the softmax of the same pre-activations and take the sum. This way we get one value for each strand.
+
+$z = \sum_{i}^{N}{p_i * \tilde{z}_i}$ with $z \in \mathbb{R}^{2}$
+
+Importantly, we have to detach the softmax activation so that it is a constant value during backpropagation of contribution scores or gradients.
+
+When computing DeepLift scores we  take the average of the two strands. 
+
+```{python}
+model = torch.load("../trained_models/all_tfs_model.pt")
+```
+
+# DeepLift
+
+We picked some exemplary regions of interest from the paper (Fig.2 and Supp.Fig.2) to compute the contribution scores and make some plots.
+
+```{python}
+dl = DeepLift(model)
+```
+
+```{python}
+def get_contr_region(seqname, start, end, dataset, model, dl, device, tf_list, output_dir, plot=True, figsize1=(20,2), figsize2=(10,1.5)):
+    """Compute the DeepLift contribution scores for a 1kb sequence which contains the shorter 
+    region of interest specified by the input arguments.
+    Params:
+        seq_name: string
+            specifies the chromosome 
+        start: int
+            specifies start coordinate of sequence of interest on chromosome
+        end: int
+            specifies end coordinate of sequence of interest on chromsome
+        dataset: utils.ChIP_Nexus_Dataset object
+        device: cuda or cpu
+        tf_list: 
+            Contains names of TFs for which we want to compute the contributions
+        plot: bool
+            Whether to visualize the DeepLift contribution scores.
+
+    Returns:
+        contr: tensor (4x1000)
+            Contains the contribution of each bp to the profile shape predictions for the input sequence.
+        dist_start: int
+            distance between the start of the 1kb sequence and the region of interest
+    """
+    # select sequence of interest
+    tmp_df, idx, dist_start, one_hot, baseline, bias_raw, bias_smooth, tf_counts = get_seq_oi(seqname, start, end, dataset, device)
+    width = end - start
+
+    # compute contribution scores for each tf
+    contr_list = []
+    plot_df = pd.DataFrame(columns=["pos", "TF", "pos_values", "neg_values"])
+    for tf_index, tf in enumerate(tf_list):
+        contr = dl.attribute(inputs=one_hot, baselines=baseline, target=(tf_index), additional_forward_args=(bias_raw, bias_smooth, True)).detach().cpu().numpy()
+        contr_list.append(contr)
+
+        pred, _ = model.forward(one_hot, bias_raw, bias_smooth, interpretation=False)
+        pred = pred.detach().cpu().numpy().squeeze()
+        # scale prediciton with total counts
+        pred = pred * tf_counts.sum(axis=-1, keepdims=True)
+        tf_df = pd.DataFrame({"pos": np.arange(width+1), "TF": tf, "pos_values": pred[tf_index, 0, dist_start : (dist_start + width+1)], "neg_values": pred[tf_index, 1, dist_start : (dist_start + width+1)]})
+        plot_df = plot_df.append(tf_df)
+
+        if plot:
+            # entire sequence original
+            plot_weights(contr,
+            fontsizes=[20,15,15],
+            title = f"{tf} - 1kbp sequence", 
+            xlabel=f"{tmp_df.seqnames[idx]}: {tmp_df.start[idx]}-{tmp_df.end[idx]}", 
+            ylabel="DeepLift contribution scores",
+            subticks_frequency=20, figsize=figsize1)
+            plt.savefig(output_dir / f"{tf}_{seqname}_{start}_{end}_entireSeq_DeepLift.pdf")
+
+            # zoomed into motif region
+            plot_weights(contr[:, :,dist_start : (dist_start + width+1)],
+            fontsizes=[20,15,15],
+            title = f"{tf} - Motif of interest", 
+            xlabel=f"{seqname}: {start}-{end}, ({dist_start} - {dist_start + width+1})", 
+            ylabel="DeepLift contribution scores",
+            subticks_frequency=10, figsize=figsize2)
+            plt.savefig(output_dir / f"{tf}_{seqname}_{start}_{end}_zoomedSeq_DeepLift.pdf")  
+            
+            # plot profiles
+            fig, axis = plt.subplots(1,2,figsize=(12,4))
+            axis[0].plot(tf_counts[tf_index, 0, :], label="true counts", color="green", linewidth=0.8)
+            axis[0].plot(-tf_counts[tf_index, 1, :], color="green", linewidth=0.8)
+            axis[0].plot(pred[tf_index, 0, :], label="pred", color="blue", linewidth=0.8)
+            axis[0].plot(-pred[tf_index, 1, :], color="blue", linewidth=0.8)   
+            axis[0].set_xlabel("bp")
+            axis[0].set_ylabel("Read counts")
+            axis[1].plot(pred[tf_index, 0, :], label="pred", color="blue", linewidth=0.8)
+            axis[1].plot(-pred[tf_index, 1, :], color="blue", linewidth=0.8)
+            axis[1].set_xlabel("bp")
+            axis[1].set_ylabel("Predicted probabilitiy * total counts")
+            axis[0].legend()
+            axis[1].legend()
+            plt.show()
+            
+    return contr, dist_start, plot_df
+```
+
+### Klf4 E2 enhancer (Supplementary Fig.2)
+
+```{python}
+contr, dist_start, pred = get_contr_region("chr4", start=55475545, end=55475604, dataset=tune_dataset, output_dir=FIG_DIR, dl=dl, tf_list=TF_LIST, device=device, model=model)
+#pred.to_csv("/home/kathi/AML_Project/data/test_fig.csv")
+```
+
+### Nanog enhancer (Supplementary Fig.2)
+
+```{python}
+contr, dist_start, pred = get_contr_region("chr6", start=122707394, end=122707454, dataset=train_dataset, output_dir=FIG_DIR, dl=dl, tf_list=TF_LIST, device=device, model=model)
+```
+
+### Fbx15 enhancer (Supplementary Fig.2)
+
+```{python}
+contr, dist_start, pred = get_contr_region("chr18", start=84934461, end=84934521, dataset=train_dataset, output_dir=FIG_DIR, dl=dl, tf_list=TF_LIST, device=device, model=model)
+```
+
+# Input x Gradient
+
+For the same exemplary regions from the paper.
+
+```#{python}
+grad, grad_in = input_gradient("chr4", start=55475545, end=55475604, dataset=tune_dataset,output_dir=FIG_DIR, 
+model=model, tf_list=TF_LIST, device=device)
+```
+
+### Klf4 E2 enhancer (Supplementary Fig.2)
+
+```#{python}
+grad, grad_in = input_gradient("chr4", start=55475545, end=55475604, dataset=tune_dataset,output_dir=FIG_DIR, 
+ model=model, tf_list=TF_LIST, device=device)
+```
+
+### Nanog enhancer (Supplementary Fig.2)
+
+```#{python}
+grad, grad_in = input_gradient("chr6", start=122707394, end=122707454, dataset=train_dataset, output_dir=FIG_DIR, 
+model=model, tf_list=TF_LIST, device=device)
+```
+
+### Fbx15 enhancer (Supplementary Fig.2)
+
+```#{python}
+grad, grad_in = input_gradient("chr17", start=35504453, end=35504603, dataset=train_dataset, output_dir=FIG_DIR, 
+model=model, tf_list=TF_LIST, device=device)
+```
