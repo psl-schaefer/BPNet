@@ -5,4 +5,5 @@
 *_cache
 __pycache__
 /.quarto/
+.DS_Store
 
