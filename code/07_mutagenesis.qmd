@@ -13,31 +13,43 @@ execute:
 
 ```{python}
 from pathlib import Path
+
 import matplotlib.pyplot as plt
-plt.style.use('dark_background')
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-from src.architectures import *
-from src.utils import * 
-from src.loss import *
-from src.metrics import *
-from src.DeepLiftUtils import *
 from captum.attr import DeepLift
 import seaborn as sns
 from matplotlib import pyplot as plt
 import modisco.visualization
 from modisco.visualization import viz_sequence
+
+from src.config import conf_dict
+from src.architectures import *
+from src.utils import * 
+from src.loss import *
+from src.metrics import *
+from src.DeepLiftUtils import *
+
+# dark mode doesn't quite work for the attribution plots
+#plt.style.use('dark_background')
 ```
 
 # Data
 
 ```{python}
-TF_LIST = ["Nanog", "Klf4", "Oct4", "Sox2"]
-BATCH_SIZE = 64
+#conf_dict["tf_list"] = ["Nanog"]
+#conf_dict["batch_size"] = 248
+#conf_dict["max_epochs"] = 25
+#conf_dict["early_stop_patience"] = 4
+#conf_dict["restore_best_weights"] = True
+
 PRC_DIR = Path("..") / "prc"
+MODELS_DIR = Path("..") / "trained_models"
+OUTPUT_DIR = Path("..") / "prc" / "mutagenesis"
+OUTPUT_DIR.mkdir(exist_ok=True, parents=True)
 FIG_DIR = Path("..") / "figures" / "mutagenesis"
 FIG_DIR.mkdir(exist_ok=True, parents=True)
 ```
@@ -55,7 +67,7 @@ print(f"Using {device} device")
 ```{python}
 train_dataset = ChIP_Nexus_Dataset(set_name="train", 
                                    input_dir=PRC_DIR, 
-                                   TF_list=TF_LIST)
+                                   TF_list=conf_dict["tf_list"])
 train_dataset
 ```
 
@@ -63,7 +75,7 @@ train_dataset
 ```{python}
 tune_dataset = ChIP_Nexus_Dataset(set_name="tune", 
                                   input_dir=PRC_DIR, 
-                                  TF_list=TF_LIST)
+                                  TF_list=conf_dict["tf_list"])
 tune_dataset
 ```
 
@@ -71,17 +83,16 @@ tune_dataset
 ```{python}
 test_dataset = ChIP_Nexus_Dataset(set_name="test", 
                                   input_dir=PRC_DIR, 
-                                  TF_list=TF_LIST)
+                                  TF_list=conf_dict["tf_list"])
 test_dataset
 ```
 
 ```{python}
-model = torch.load("../trained_models/all_tfs_model.pt")
+model = torch.load(MODELS_DIR / "all_tfs_model.pt")
 ```
 
 ```{python}
 dl = DeepLift(model)
-
 ```
 
 ```{python}
@@ -115,8 +126,8 @@ def remove_motif(seqname, start, end, dataset, dl, tf_list, device, output_dir, 
   assert torch.all(one_hot == mut_one_hot) == False
 
   contr_list = []
-  plot_df = pd.DataFrame(columns=["pos", "TF", "pos_values", "neg_values"])
-  for tf_index, tf in enumerate(TF_LIST):
+  df_list = []
+  for tf_index, tf in enumerate(conf_dict["tf_list"]):
     # compute contribution scores on original and mutated strand
     contr = dl.attribute(inputs=one_hot, baselines=baseline, target=tf_index, 
             additional_forward_args=(bias_raw, bias_smooth, True)).detach().cpu().numpy()
@@ -135,7 +146,7 @@ def remove_motif(seqname, start, end, dataset, dl, tf_list, device, output_dir, 
     mut_pred = mut_pred * tf_counts.sum(axis=-1, keepdims=True)
 
     tf_df = pd.DataFrame({"pos": np.arange(1000), "TF": tf, "pos_values": pred[tf_index, 0,:], "neg_values": pred[tf_index, 1,:], "mut_pos_values" : mut_pred[tf_index, 0, :], "mut_neg_values" : mut_pred[tf_index, 1,:], "tf_counts_pos": tf_counts[tf_index, 0, :], "tf_counts_neg": tf_counts[tf_index, 1, :]})
-    plot_df = plot_df.append(tf_df)
+    df_list.append(tf_df)
 
     if plot:
       plot_weights(contr,
@@ -152,7 +163,7 @@ def remove_motif(seqname, start, end, dataset, dl, tf_list, device, output_dir, 
       xlabel=f"{seqname}: {start}-{end}",#, ({dist_start} - {dist_start + width})", 
       ylabel="DeepLift contribution scores",
       subticks_frequency=10, figsize=figsize2)
-      plt.savefig(f"{output_dir}{tf}_{seqname}_{start}_{end}_original_{suffix}.pdf")  
+      plt.savefig(output_dir / f"{tf}_{seqname}_{start}_{end}_original_{suffix}.pdf")  
 
       # entire mutated sequence
       plot_weights(mut_contr,
@@ -189,6 +200,7 @@ def remove_motif(seqname, start, end, dataset, dl, tf_list, device, output_dir, 
       axis[0].legend()
       axis[1].legend()
       plt.show()
+  plot_df = pd.concat(df_list)
 
   return contr, mut_contr, dist_start, plot_df
 ```
@@ -196,19 +208,19 @@ def remove_motif(seqname, start, end, dataset, dl, tf_list, device, output_dir, 
 # Remove entire motif
 
 ```{python}
-_, _, dist_start, plot_df = remove_motif(seqname, start=a, end=b, dataset=train_dataset,  dl=dl, suffix="remove", output_dir=OUTPUT_DIR, tf_list=TF_LIST, device=device, figsize1=(30,2), figsize2=(10,1.5))
-plot_df.to_csv("/home/kathi/AML_Project/data/remove_motif.csv")
+_, _, dist_start, plot_df = remove_motif(seqname, start=a, end=b, dataset=train_dataset,  dl=dl, suffix="remove", output_dir=FIG_DIR, tf_list=conf_dict["tf_list"], device=device, figsize1=(30,2), figsize2=(10,1.5))
+plot_df.to_csv(OUTPUT_DIR / "remove_motif.csv")
 ```
 
 ```{r}
 library(tidyverse)
-output_dir = "/home/kathi/AML_Project/data/mutation_figures/"
+output_dir = py$FIG_DIR
 colors = c("Oct4" = "#CD5C5C",
            "Sox2" = "#849EEB",
            "Nanog" = "#FFE03F",
            "Klf4" = "#92C592",
            "patchcap" = "#827F81")
-df = read.csv("/home/kathi/AML_Project/data/remove_motif.csv")
+df = read.csv(file.path(py$OUTPUR_DIR, "remove_motif.csv"))
 df %>%
   ggplot() +
   geom_line(aes(x=pos, y=tf_counts_pos, col="black"))+#, alpha=0.8)) +
@@ -240,20 +252,20 @@ ggsave(paste0(output_dir, "chr4_55475545_55475604_remove_mutpred.pdf"))
 
 # Remove Oct4 part
 ```{python}
-_, _, dist_start, plot_df = remove_motif(seqname, start=a, end=a+8, dataset=train_dataset, suffix="remove_oct4", output_dir=OUTPUT_DIR,  dl=dl, tf_list=TF_LIST, device=device, extend_left=23, extend_right=23+6, figsize1=(30,2), figsize2=(10, 1.5))
-plot_df.to_csv("/home/kathi/AML_Project/data/remove_oct4.csv")
+_, _, dist_start, plot_df = remove_motif(seqname, start=a, end=a+8, dataset=train_dataset, suffix="remove_oct4", output_dir=FIG_DIR,  dl=dl, tf_list=conf_dict["tf_list"], device=device, extend_left=23, extend_right=23+6, figsize1=(30,2), figsize2=(10, 1.5))
+plot_df.to_csv(OUTPUT_DIR / "remove_oct4.csv")
 
 ```
 
 ```{r}
 library(tidyverse)
-output_dir = "/home/kathi/AML_Project/data/mutation_figures/"
+output_dir = py$FIG_DIR
 colors = c("Oct4" = "#CD5C5C",
            "Sox2" = "#849EEB",
            "Nanog" = "#FFE03F",
            "Klf4" = "#92C592",
            "patchcap" = "#827F81")
-df = read.csv("/home/kathi/AML_Project/data/remove_oct4.csv")
+df = read.csv(file.path(py$OUTPUR_DIR, "remove_oct4.csv"))
 df %>%
   ggplot() +
   geom_line(aes(x=pos, y=tf_counts_pos, col="black"))+#, alpha=0.8)) +
@@ -286,20 +298,20 @@ ggsave(paste0(output_dir, "chr4_55475545_55475604_remove_oct4_mutpred.pdf"))
 # Remove Sox2 part
 
 ```{python}
-_, _, dist_start, plot_df = remove_motif(seqname, start=a+8, end=b, dataset=train_dataset,  suffix="remove_sox2", output_dir=OUTPUT_DIR, dl=dl, tf_list=TF_LIST, device=device, figsize1=(30,2), figsize2=(10,1.5))
-plot_df.to_csv("/home/kathi/AML_Project/data/remove_sox2.csv")
+_, _, dist_start, plot_df = remove_motif(seqname, start=a+8, end=b, dataset=train_dataset,  suffix="remove_sox2", output_dir=FIG_DIR, dl=dl, tf_list=conf_dict["tf_list"], device=device, figsize1=(30,2), figsize2=(10,1.5))
+plot_df.to_csv(OUTPUT_DIR / "remove_sox2.csv")
 
 ```
 
 ```{r}
 library(tidyverse)
-output_dir = "/home/kathi/AML_Project/data/mutation_figures/"
+output_dir = py$FIG_DIR
 colors = c("Oct4" = "#CD5C5C",
            "Sox2" = "#849EEB",
            "Nanog" = "#FFE03F",
            "Klf4" = "#92C592",
            "patchcap" = "#827F81")
-df = read.csv("/home/kathi/AML_Project/data/remove_sox2.csv")
+df = read.csv(file.path(py$OUTPUR_DIR, "remove_sox2.csv"))
 df %>%
   ggplot() +
   geom_line(aes(x=pos, y=tf_counts_pos, col="black"))+#, alpha=0.8)) +
@@ -350,7 +362,7 @@ def move_motifs_apart(seqname, start, end, dataset, DeepLiftModel, distance, plo
 
 
   contr_list = []
-  for tf_index, tf in enumerate(TF_LIST):
+  for tf_index, tf in enumerate(conf_dict["tf_list"]):
     # compute contribution scores on original and mutated strand
     contr = dl.attribute(inputs=one_hot, baselines=baseline, target=tf_index, additional_forward_args=(bias_raw, bias_smooth, True)).detach().cpu().numpy()
     mut_contr = dl.attribute(inputs=mut_one_hot, baselines = baseline, target=tf_index, additional_forward_args=(bias_raw, bias_smooth, True)).detach().cpu().numpy()

@@ -13,43 +13,29 @@ execute:
 
 - b) Predict both shape and total count of the TF ChIP-Nexus profiles
 
-# Train Parameters
+# Libraries
 
 ```{python}
 from pathlib import Path 
 
-TF_LIST = ["Nanog", "Klf4", "Oct4", "Sox2"]
-#TF_LIST = ["Nanog"]
-PRC_DIR = Path("..") / "prc"
-STATS_DIR = Path("..") / "stats"
-STATS_DIR.mkdir(exist_ok=True, parents=True)
-MODELS_DIR = Path("..") / "trained_models"
-MODELS_DIR.mkdir(exist_ok=True, parents=True)
-BATCH_SIZE = 248
-MAX_EPOCHS = 25
-EARLY_STOP_PATIENCE = 4
-RESTORE_BEST_WEIGHTS = True
-```
-
-# Libraries
-
-```{python}
 import matplotlib.pyplot as plt
 import numpy as np
-plt.style.use('dark_background')
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-from src.architectures import BPNet
-from src.utils import ChIP_Nexus_Dataset, dummy_shape_predictions, dummy_total_counts_predictions
-from src.loss import neg_log_multinomial
-from src.metrics import permute_array, bin_max_values, bin_counts_amb, binary_labels_from_counts, compute_auprc_bins
 import pandas as pd
 import sklearn.metrics as skm
 import seaborn as sns
 
+from src.config import conf_dict
+from src.architectures import BPNet
+from src.utils import ChIP_Nexus_Dataset, dummy_shape_predictions, dummy_total_counts_predictions
+from src.loss import neg_log_multinomial
+from src.metrics import permute_array, bin_max_values, bin_counts_amb, binary_labels_from_counts, compute_auprc_bins
+
+plt.style.use('dark_background')
 color_pal = {"Oct4": "#CD5C5C", "Sox2": "#849EEB", "Nanog": "#FFE03F", "Klf4": "#92C592", "patchcap": "#827F81"}
 ```
 
@@ -63,12 +49,28 @@ else:
 print(f"Using {device} device")
 ```
 
+# Setup
+
+```{python}
+#conf_dict["tf_list"] = ["Nanog"]
+#conf_dict["batch_size"] = 248
+#conf_dict["max_epochs"] = 25
+#conf_dict["early_stop_patience"] = 4
+#conf_dict["restore_best_weights"] = True
+
+PRC_DIR = Path("..") / "prc"
+STATS_DIR = Path("..") / "stats"
+STATS_DIR.mkdir(exist_ok=True, parents=True)
+MODELS_DIR = Path("..") / "trained_models"
+MODELS_DIR.mkdir(exist_ok=True, parents=True)
+```
+
 # Data
 
 ```{python}
 train_dataset = ChIP_Nexus_Dataset(set_name="train", 
                                    input_dir=PRC_DIR, 
-                                   TF_list=TF_LIST)
+                                   TF_list=conf_dict["tf_list"])
 train_dataset
 ```
 
@@ -90,7 +92,7 @@ dummy_total_counts_predictions(train_dataset)
 ```{python}
 tune_dataset = ChIP_Nexus_Dataset(set_name="tune", 
                                   input_dir=PRC_DIR, 
-                                  TF_list=TF_LIST)
+                                  TF_list=conf_dict["tf_list"])
 tune_dataset
 ```
 
@@ -101,8 +103,8 @@ dummy_shape_predictions(tune_dataset)
 ```{python}
 test_dataset = ChIP_Nexus_Dataset(set_name="test", 
                                   input_dir=PRC_DIR, 
-                                  TF_list=TF_LIST)
-test_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
+                                  TF_list=conf_dict["tf_list"])
+test_dataloader = DataLoader(test_dataset, batch_size=conf_dict["batch_size"], shuffle=False, num_workers=0, pin_memory=True)
 test_dataset
 ```
 
@@ -119,18 +121,18 @@ dummy_total_counts_predictions(test_dataset)
 ## Train Loop
 
 ```{python}
-model = BPNet(n_dil_layers=9, TF_list=TF_LIST, pred_total=False, bias_track=True).to(device)
+model = BPNet(n_dil_layers=9, TF_list=conf_dict["tf_list"], pred_total=False, bias_track=True).to(device)
 optimizer = optim.Adam(model.parameters(), lr=4*1e-4)
 
-train_loader=DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, 
+train_loader=DataLoader(train_dataset, batch_size=conf_dict["batch_size"], shuffle=True, 
                         num_workers=0, pin_memory=True)
-tune_loader=DataLoader(tune_dataset, batch_size=BATCH_SIZE, shuffle=False, 
+tune_loader=DataLoader(tune_dataset, batch_size=conf_dict["batch_size"], shuffle=False, 
                        num_workers=0, pin_memory=True)
 
 train_loss, test_loss = [], []
 patience_counter = 0
 
-for epoch in range(MAX_EPOCHS):
+for epoch in range(conf_dict["max_epochs"]):
   print(epoch)
 
   # test
@@ -162,10 +164,10 @@ for epoch in range(MAX_EPOCHS):
     patience_counter = 0
     best_state_dict = model.state_dict()
 
-  if patience_counter == EARLY_STOP_PATIENCE:
+  if patience_counter == conf_dict["early_stop_patience"]:
     break
 
-if RESTORE_BEST_WEIGHTS:
+if conf_dict["restore_best_weights"]:
   model.load_state_dict(best_state_dict)
 ```
 
@@ -291,8 +293,8 @@ with torch.no_grad():
         one_hot, tf_counts, ctrl_counts, ctrl_smooth = one_hot.to(device), tf_counts.to(device), ctrl_counts.to(device), ctrl_smooth.to(device)
         profile_pred = model.forward(sequence=one_hot, bias_raw=ctrl_counts, bias_smooth=ctrl_smooth)
         #print(profile_pred.shape)
-        start = batch_idx*BATCH_SIZE
-        end = (batch_idx+1)*BATCH_SIZE if (batch_idx+1)*BATCH_SIZE < test_dataset.tf_counts.shape[0] else test_dataset.tf_counts.shape[0]
+        start = batch_idx*conf_dict["batch_size"]
+        end = (batch_idx+1)*conf_dict["batch_size"] if (batch_idx+1)*conf_dict["batch_size"] < test_dataset.tf_counts.shape[0] else test_dataset.tf_counts.shape[0]
         test_pred[start:end, :, :, :] = profile_pred
 ```
 
@@ -318,14 +320,14 @@ def plot_prc(test_dataset, test_pred, tf_index, tf_name, plot = True):
 ```
 
 ```{python}
-for i, tf in enumerate(TF_LIST):
+for i, tf in enumerate(conf_dict["tf_list"]):
     plot_prc(test_dataset, test_pred, i, tf, plot=True)
 plt.show()
 ```
 
 ```{python}
 df_list = []
-for i, tf in enumerate(TF_LIST):
+for i, tf in enumerate(conf_dict["tf_list"]):
     precision, recall, thresholds = plot_prc(test_dataset, test_pred, i, tf, plot=False)
     tmp_df = pd.DataFrame({
       "TF": tf,
@@ -345,7 +347,7 @@ all_pred = test_pred.cpu().numpy().copy()
 patchcap = test_dataset.ctrl_counts.copy()
 assert np.allclose(all_pred.sum(axis=-1), 1)
 
-for tf_index, tf in enumerate(TF_LIST):
+for tf_index, tf in enumerate(conf_dict["tf_list"]):
     patchcap_cp = patchcap.copy()
     # subset for one tf
     pred = all_pred[:, tf_index, :, :]
@@ -368,18 +370,18 @@ for tf_index, tf in enumerate(TF_LIST):
 ## Train Loop
 
 ```{python}
-model = BPNet(n_dil_layers=9, TF_list=TF_LIST, pred_total=True, bias_track=True).to(device)
+model = BPNet(n_dil_layers=9, TF_list=conf_dict["tf_list"], pred_total=True, bias_track=True).to(device)
 optimizer = optim.Adam(model.parameters(), lr=4*1e-4)
 
-train_loader=DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=True)
-tune_loader=DataLoader(tune_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
+train_loader=DataLoader(train_dataset, batch_size=conf_dict["batch_size"], shuffle=True, num_workers=0, pin_memory=True)
+tune_loader=DataLoader(tune_dataset, batch_size=conf_dict["batch_size"], shuffle=False, num_workers=0, pin_memory=True)
 
 train_shape_loss, train_count_loss, train_loss = [], [], []
 test_shape_loss, test_count_loss, test_loss = [], [], []
 
 patience_counter = 0
 
-for epoch in range(MAX_EPOCHS):
+for epoch in range(conf_dict["max_epochs"]):
 
   # test
   test_shape_loss_epoch, test_count_loss_epoch, test_loss_epoch = [], [], []
@@ -424,10 +426,10 @@ for epoch in range(MAX_EPOCHS):
     patience_counter = 0
     best_state_dict = model.state_dict()
 
-  if patience_counter == EARLY_STOP_PATIENCE:
+  if patience_counter == conf_dict["early_stop_patience"]:
     break
 
-if RESTORE_BEST_WEIGHTS:
+if conf_dict["restore_best_weights"]:
   model.load_state_dict(best_state_dict)
 ```
 
@@ -497,13 +499,13 @@ shape_pred, count_pred = model.forward(torch.from_numpy(test_dataset.one_hot_seq
 
 shape_pred = shape_pred.cpu().detach().numpy()
 
-df = pd.DataFrame(columns=["position", "TF", "strand", "kind", "value"])
-
+df_list = []
 for data, kind in zip([test_dataset.tf_counts[idx], shape_pred[0]], ["counts", "prediction"]):
-  for i, tf in enumerate(TF_LIST):
+  for i, tf in enumerate(conf_dict["tf_list"]):
     for j, strand in enumerate(["pos", "neg"]):
       tmp_df = pd.DataFrame({"position": np.arange(1000), "TF": tf, "strand": strand, "kind": kind, "value": data[i, j]})
-      df = df.append(tmp_df)
+      df_list.append(tmp_df)
+df = pd.concat(df_list)
 df.to_csv(STATS_DIR / "example_shape_prediction.csv")
 ```
 
@@ -591,8 +593,8 @@ with torch.no_grad():
         one_hot, tf_counts, ctrl_counts, ctrl_smooth = one_hot.to(device), tf_counts.to(device), ctrl_counts.to(device), ctrl_smooth.to(device)
         profile_pred, count_pred = model.forward(sequence=one_hot, bias_raw=ctrl_counts, bias_smooth=ctrl_smooth)
         #print(profile_pred.shape)
-        start = batch_idx*BATCH_SIZE
-        end = (batch_idx+1)*BATCH_SIZE if (batch_idx+1)*BATCH_SIZE < test_dataset.tf_counts.shape[0] else test_dataset.tf_counts.shape[0]
+        start = batch_idx*conf_dict["batch_size"]
+        end = (batch_idx+1)*conf_dict["batch_size"] if (batch_idx+1)*conf_dict["batch_size"] < test_dataset.tf_counts.shape[0] else test_dataset.tf_counts.shape[0]
         test_pred[start:end] = profile_pred
         test_count_pred[start:end] = count_pred
 ```
@@ -618,21 +620,22 @@ def plot_prc(test_dataset, test_pred, tf_index, tf_name, plot = True):
 ```
 
 ```{python}
-for i, tf in enumerate(TF_LIST):
+for i, tf in enumerate(conf_dict["tf_list"]):
     plot_prc(test_dataset, test_pred, i, tf, plot=True)
     plt.legend()
 ```
 
 ```{python}
-df = pd.DataFrame(columns=["TF", "precision", "recall"])
-for i, tf in enumerate(TF_LIST):
+df_list = []
+for i, tf in enumerate(conf_dict["tf_list"]):
     precision, recall, thresholds = plot_prc(test_dataset, test_pred, i, tf, plot=False)
     tmp_df = pd.DataFrame({
       "TF": tf,
       "precision": precision,
       "recall": recall,
     })
-    df = df.append(tmp_df)
+    df_list.append(tmp_df)
+df = pd.concat(df_list)
 df.to_csv(STATS_DIR / "pr_curve_all_tfs_count_model.csv", index=False)
 del df, tmp_df
 ```
@@ -644,7 +647,7 @@ all_pred = test_pred.cpu().numpy().copy()
 patchcap = test_dataset.ctrl_counts.copy()
 assert np.allclose(all_pred.sum(axis=-1), 1)
 
-for tf_index, tf in enumerate(TF_LIST):
+for tf_index, tf in enumerate(conf_dict["tf_list"]):
     patchcap_cp = patchcap.copy()
     # subset for one tf
     pred = all_pred[:, tf_index, :, :]
@@ -670,7 +673,7 @@ pred_total_counts = test_count_pred.cpu().detach().numpy()
 tf_means = true_total_counts.mean(axis=0)
 
 df = pd.DataFrame(columns=["TF", "mse", "tss", "rss", "r2"])
-for i, tf in enumerate(TF_LIST):
+for i, tf in enumerate(conf_dict["tf_list"]):
   mse = ((np.log1p(true_total_counts[:, i]) - np.log1p(pred_total_counts[:, i]))**2).mean()
   tss = ((true_total_counts[:, i] - tf_means[None, i])**2).sum()
   rss = ((true_total_counts[:, i] - pred_total_counts[:, i])**2).sum()

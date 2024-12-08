@@ -13,31 +13,41 @@ execute:
 
 ```{python}
 from pathlib import Path
+
 import matplotlib.pyplot as plt
-plt.style.use('dark_background')
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-from src.architectures import *
-from src.utils import * 
-from src.loss import *
-from src.metrics import *
-from src.DeepLiftUtils import *
 from captum.attr import DeepLift
 import seaborn as sns
 from matplotlib import pyplot as plt
 import modisco.visualization
 from modisco.visualization import viz_sequence
+
+from src.config import conf_dict
+from src.architectures import *
+from src.utils import * 
+from src.loss import *
+from src.metrics import *
+from src.DeepLiftUtils import *
+
+# dark mode doesn't quite work for the attribution plots
+#plt.style.use('dark_background')
 ```
 
 # Data
 
 ```{python}
-TF_LIST = ["Nanog", "Klf4", "Oct4", "Sox2"]
-BATCH_SIZE = 64
+#conf_dict["tf_list"] = ["Nanog"]
+#conf_dict["batch_size"] = 248
+#conf_dict["max_epochs"] = 25
+#conf_dict["early_stop_patience"] = 4
+#conf_dict["restore_best_weights"] = True
+
 PRC_DIR = Path("..") / "prc"
+MODELS_DIR = Path("..") / "trained_models"
 FIG_DIR = Path("..") / "figures" / "interpretability"
 FIG_DIR.mkdir(exist_ok=True, parents=True)
 ```
@@ -55,21 +65,21 @@ print(f"Using {device} device")
 ```{python}
 train_dataset = ChIP_Nexus_Dataset(set_name="train", 
                                    input_dir=PRC_DIR, 
-                                   TF_list=TF_LIST)
+                                   TF_list=conf_dict["tf_list"])
 train_dataset
 ```
 
 ```{python}
 tune_dataset = ChIP_Nexus_Dataset(set_name="tune", 
                                   input_dir=PRC_DIR, 
-                                  TF_list=TF_LIST)
+                                  TF_list=conf_dict["tf_list"])
 tune_dataset
 ```
 
 ```{python}
 test_dataset = ChIP_Nexus_Dataset(set_name="test", 
                                   input_dir=PRC_DIR, 
-                                  TF_list=TF_LIST)
+                                  TF_list=conf_dict["tf_list"])
 test_dataset
 ```
 
@@ -90,7 +100,7 @@ Importantly, we have to detach the softmax activation so that it is a constant v
 When computing DeepLift scores we  take the average of the two strands. 
 
 ```{python}
-model = torch.load("../trained_models/all_tfs_model.pt")
+model = torch.load(MODELS_DIR / "all_tfs_model.pt")
 ```
 
 # DeepLift
@@ -131,7 +141,7 @@ def get_contr_region(seqname, start, end, dataset, model, dl, device, tf_list, o
 
     # compute contribution scores for each tf
     contr_list = []
-    plot_df = pd.DataFrame(columns=["pos", "TF", "pos_values", "neg_values"])
+    df_list = []
     for tf_index, tf in enumerate(tf_list):
         contr = dl.attribute(inputs=one_hot, baselines=baseline, target=(tf_index), additional_forward_args=(bias_raw, bias_smooth, True)).detach().cpu().numpy()
         contr_list.append(contr)
@@ -141,7 +151,7 @@ def get_contr_region(seqname, start, end, dataset, model, dl, device, tf_list, o
         # scale prediciton with total counts
         pred = pred * tf_counts.sum(axis=-1, keepdims=True)
         tf_df = pd.DataFrame({"pos": np.arange(width+1), "TF": tf, "pos_values": pred[tf_index, 0, dist_start : (dist_start + width+1)], "neg_values": pred[tf_index, 1, dist_start : (dist_start + width+1)]})
-        plot_df = plot_df.append(tf_df)
+        df_list.append(tf_df)
 
         if plot:
             # entire sequence original
@@ -177,6 +187,7 @@ def get_contr_region(seqname, start, end, dataset, model, dl, device, tf_list, o
             axis[0].legend()
             axis[1].legend()
             plt.show()
+    plot_df = pd.concat(df_list)
             
     return contr, dist_start, plot_df
 ```
@@ -184,20 +195,20 @@ def get_contr_region(seqname, start, end, dataset, model, dl, device, tf_list, o
 ### Klf4 E2 enhancer (Supplementary Fig.2)
 
 ```{python}
-contr, dist_start, pred = get_contr_region("chr4", start=55475545, end=55475604, dataset=tune_dataset, output_dir=FIG_DIR, dl=dl, tf_list=TF_LIST, device=device, model=model)
+contr, dist_start, pred = get_contr_region("chr4", start=55475545, end=55475604, dataset=tune_dataset, output_dir=FIG_DIR, dl=dl, tf_list=conf_dict["tf_list"], device=device,   model=model)
 #pred.to_csv("/home/kathi/AML_Project/data/test_fig.csv")
 ```
 
 ### Nanog enhancer (Supplementary Fig.2)
 
 ```{python}
-contr, dist_start, pred = get_contr_region("chr6", start=122707394, end=122707454, dataset=train_dataset, output_dir=FIG_DIR, dl=dl, tf_list=TF_LIST, device=device, model=model)
+contr, dist_start, pred = get_contr_region("chr6", start=122707394, end=122707454, dataset=train_dataset, output_dir=FIG_DIR, dl=dl, tf_list=conf_dict["tf_list"], device=device, model=model)
 ```
 
 ### Fbx15 enhancer (Supplementary Fig.2)
 
 ```{python}
-contr, dist_start, pred = get_contr_region("chr18", start=84934461, end=84934521, dataset=train_dataset, output_dir=FIG_DIR, dl=dl, tf_list=TF_LIST, device=device, model=model)
+contr, dist_start, pred = get_contr_region("chr18", start=84934461, end=84934521, dataset=train_dataset, output_dir=FIG_DIR, dl=dl, tf_list=conf_dict["tf_list"], device=device, model=model)
 ```
 
 # Input x Gradient
@@ -206,26 +217,26 @@ For the same exemplary regions from the paper.
 
 ```#{python}
 grad, grad_in = input_gradient("chr4", start=55475545, end=55475604, dataset=tune_dataset,output_dir=FIG_DIR, 
-model=model, tf_list=TF_LIST, device=device)
+model=model, tf_list=conf_dict["tf_list"], device=device)
 ```
 
 ### Klf4 E2 enhancer (Supplementary Fig.2)
 
 ```#{python}
 grad, grad_in = input_gradient("chr4", start=55475545, end=55475604, dataset=tune_dataset,output_dir=FIG_DIR, 
- model=model, tf_list=TF_LIST, device=device)
+ model=model, tf_list=conf_dict["tf_list"], device=device)
 ```
 
 ### Nanog enhancer (Supplementary Fig.2)
 
 ```#{python}
 grad, grad_in = input_gradient("chr6", start=122707394, end=122707454, dataset=train_dataset, output_dir=FIG_DIR, 
-model=model, tf_list=TF_LIST, device=device)
+model=model, tf_list=conf_dict["tf_list"], device=device)
 ```
 
 ### Fbx15 enhancer (Supplementary Fig.2)
 
 ```#{python}
 grad, grad_in = input_gradient("chr17", start=35504453, end=35504603, dataset=train_dataset, output_dir=FIG_DIR, 
-model=model, tf_list=TF_LIST, device=device)
+model=model, tf_list=conf_dict["tf_list"], device=device)
 ```

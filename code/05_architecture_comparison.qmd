@@ -5,44 +5,60 @@ execute:
   freeze: auto
 ---
 
-# Train Parameters
-
-```{python}
-TF_LIST = ["Nanog", "Klf4", "Oct4", "Sox2"]
-PRC_DIR = Path("..") / "prc"
-MODELS_DIR = Path("..") / "trained_models"
-MODELS_DIR.mkdir(exists=True, parents=True)
-
-BATCH_SIZE = 64
-ALPHA = 10
-MAX_EPOCHS = 25
-EARLY_STOP_PATIENCE = 4
-RESTORE_BEST_WEIGHTS = True
-plot_while_train = False
-retrain_conv_layers = False
-retrain_channel = False
-retrain_kern_size = False
-```
-
 # Libraries
 
 ```{python}
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import numpy as np
-plt.style.use('dark_background')
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import sklearn.metrics as skm
+import pandas as pd
+import seaborn as sns
 from torch.utils.data import Dataset, DataLoader
+
+from src.config import conf_dict
 from src.architectures import BPNet
 from src.utils import ChIP_Nexus_Dataset, dummy_shape_predictions, dummy_total_counts_predictions
 from src.loss import neg_log_multinomial
 from src.metrics import permute_array, bin_max_values, bin_counts_amb, binary_labels_from_counts, compute_auprc_bins
+
 color_pal = {"Oct4": "#CD5C5C", "Sox2": "#849EEB", "Nanog": "#FFE03F", "Klf4": "#92C592", "patchcap": "#827F81"}
-import sklearn.metrics as skm
-import pandas as pd
-import seaborn as sns
+plt.style.use('dark_background')
+```
+
+```{python}
+if torch.cuda.is_available():
+  device = "cuda"
+elif torch.backends.mps.is_available():
+  device = torch.device("mps")
+else:
+  decive = "cpu"
+print(f"Using {device} device")
+```
+
+# Setup
+
+```{python}
+#conf_dict["tf_list"] = ["Nanog"]
+#conf_dict["batch_size"] = 248
+#conf_dict["max_epochs"] = 25
+#conf_dict["early_stop_patience"] = 4
+#conf_dict["restore_best_weights"] = True
+
+PRC_DIR = Path("..") / "prc"
+STATS_DIR = Path("..") / "stats" / "architecture_comparison"
+STATS_DIR.mkdir(exist_ok=True, parents=True)
+MODELS_DIR = Path("..") / "trained_models"
+MODELS_DIR.mkdir(exist_ok=True, parents=True)
+
+#retrain_conv_layers = True
+retrain_channel = True
+retrain_kern_size = True
 ```
 
 ```{python}
@@ -60,7 +76,7 @@ print(f"Using {device} device")
 ```{python}
 train_dataset = ChIP_Nexus_Dataset(set_name="train", 
                                    input_dir=PRC_DIR, 
-                                   TF_list=TF_LIST)
+                                   TF_list=conf_dict["tf_list"])
 train_dataset
 ```
 
@@ -82,7 +98,7 @@ dummy_total_counts_predictions(train_dataset)
 ```{python}
 tune_dataset = ChIP_Nexus_Dataset(set_name="tune", 
                                   input_dir=PRC_DIR, 
-                                  TF_list=TF_LIST)
+                                  TF_list=conf_dict["tf_list"])
 tune_dataset
 ```
 
@@ -99,16 +115,16 @@ n_layers_list = np.arange(1,16)
 
 if retrain_conv_layers:
   for n_layers in n_layers_list:
-    model = BPNet(n_dil_layers=n_layers, TF_list=TF_LIST, pred_total=False, bias_track=True).to(device)
+    model = BPNet(n_dil_layers=n_layers, TF_list=conf_dict["tf_list"], pred_total=False, bias_track=True).to(device)
     optimizer = optim.Adam(model.parameters(), lr=4*1e-4)
 
-    train_loader=DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=True)
-    tune_loader=DataLoader(tune_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
+    train_loader=DataLoader(train_dataset, batch_size=conf_dict["batch_size"], shuffle=True, num_workers=0, pin_memory=True)
+    tune_loader=DataLoader(tune_dataset, batch_size=conf_dict["batch_size"], shuffle=False, num_workers=0, pin_memory=True)
 
     train_loss, test_loss = [], []
     patience_counter = 0
 
-    for epoch in range(MAX_EPOCHS):
+    for epoch in range(conf_dict["max_epochs"]):
       model.train()
       train_loss_epoch = []
       for one_hot, tf_counts, ctrl_counts, ctrl_smooth in train_loader:
@@ -137,10 +153,10 @@ if retrain_conv_layers:
         patience_counter = 0
         best_state_dict = model.state_dict()
 
-      if patience_counter == EARLY_STOP_PATIENCE:
+      if patience_counter == conf_dict["early_stop_patience"]:
         break
     
-    if RESTORE_BEST_WEIGHTS:
+    if conf_dict["restore_best_weights"]:
       model.load_state_dict(best_state_dict)
 
     # plot train and test loss
@@ -152,7 +168,7 @@ if retrain_conv_layers:
     plt.show()
 
     # save the model
-    torch.save(obj=model, f=f"/home/philipp/BPNet/trained_models/{n_layers}_dil_layers_model.pt")
+    torch.save(obj=model, f=MODELS_DIR / f"{n_layers}_dil_layers_model.pt")
 ```
 
 ## Evaluation
@@ -160,7 +176,7 @@ if retrain_conv_layers:
 ```{python}
 test_dataset = ChIP_Nexus_Dataset(set_name="test", 
                                   input_dir=PRC_DIR, 
-                                  TF_list=TF_LIST)
+                                  TF_list=conf_dict["tf_list"])
 test_dataset
 ```
 
@@ -170,7 +186,7 @@ save_scores = []
 test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
 true_counts = test_dataset.tf_counts.copy()
 for n in n_layers_list:
-  model = torch.load(f"/home/philipp/BPNet/trained_models/{n}_dil_layers_model.pt")
+  model = torch.load(MODELS_DIR / f"{n}_dil_layers_model.pt")
   # make predictions
   pred = torch.zeros(test_dataset.tf_counts.shape, dtype=torch.float32).to(device)
   with torch.no_grad():
@@ -182,7 +198,7 @@ for n in n_layers_list:
   all_pred = pred.cpu().numpy().copy()
   assert np.allclose(all_pred.sum(axis=-1), 1)
           
-  for i, tf in enumerate(TF_LIST): # loop over the four TFs
+  for i, tf in enumerate(conf_dict["tf_list"]): # loop over the four TFs
       pred_tf = all_pred[:, i, :, :]
       counts_tf = true_counts[:, i, :, :]
       labels, predictions, random = binary_labels_from_counts(counts_tf, pred_tf)
@@ -194,7 +210,7 @@ for n in n_layers_list:
 
 ```{python}
 df = pd.DataFrame(save_scores)
-df.to_csv("/home/philipp/BPNet/out/dil_layers_auprc.csv")
+df.to_csv(STATS_DIR / "dil_layers_auprc.csv")
 sns.scatterplot(data=df, x="n_layers", y="auprc", hue="tf", palette=color_pal)
 plt.show()
 ```
@@ -208,16 +224,16 @@ n_channel_list = np.array([2, 4, 8, 16, 32, 64, 128, 256])
 
 if retrain_channel:
   for n_channel in n_channel_list:
-    model = BPNet(n_dil_layers=9, TF_list=TF_LIST, pred_total=False, bias_track=True, conv_channels=n_channel).to(device)
+    model = BPNet(n_dil_layers=9, TF_list=conf_dict["tf_list"], pred_total=False, bias_track=True, conv_channels=n_channel).to(device)
     optimizer = optim.Adam(model.parameters(), lr=4*1e-4)
 
-    train_loader=DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=True)
-    tune_loader=DataLoader(tune_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
+    train_loader=DataLoader(train_dataset, batch_size=conf_dict["batch_size"], shuffle=True, num_workers=0, pin_memory=True)
+    tune_loader=DataLoader(tune_dataset, batch_size=conf_dict["batch_size"], shuffle=False, num_workers=0, pin_memory=True)
 
     train_loss, test_loss = [], []
     patience_counter = 0
 
-    for epoch in range(MAX_EPOCHS):
+    for epoch in range(conf_dict["max_epochs"]):
       model.train()
       train_loss_epoch = []
       for one_hot, tf_counts, ctrl_counts, ctrl_smooth in train_loader:
@@ -246,10 +262,10 @@ if retrain_channel:
         patience_counter = 0
         best_state_dict = model.state_dict()
 
-      if patience_counter == EARLY_STOP_PATIENCE:
+      if patience_counter == conf_dict["early_stop_patience"]:
         break
     
-    if RESTORE_BEST_WEIGHTS:
+    if conf_dict["restore_best_weights"]:
       model.load_state_dict(best_state_dict)
 
     # plot train and test loss
@@ -261,7 +277,7 @@ if retrain_channel:
     plt.show()
 
     # save the model
-    torch.save(obj=model, f=f"/home/philipp/BPNet/trained_models/{n_channel}_conv_channel_model.pt")
+    torch.save(obj=model, f=MODELS_DIR / f"{n_channel}_conv_channel_model.pt")
 ```
 
 ## Evaluation
@@ -269,7 +285,7 @@ if retrain_channel:
 ```{python}
 test_dataset = ChIP_Nexus_Dataset(set_name="test", 
                                   input_dir=PRC_DIR, 
-                                  TF_list=TF_LIST)
+                                  TF_list=conf_dict["tf_list"])
 test_dataset
 ```
 
@@ -278,7 +294,7 @@ save_scores = []
 test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
 true_counts = test_dataset.tf_counts.copy()
 for n in n_channel_list:
-  model = torch.load(f"/home/philipp/BPNet/trained_models/{n}_conv_channel_model.pt")
+  model = torch.load(MODELS_DIR / f"{n}_conv_channel_model.pt")
   # make predictions
   pred = torch.zeros(test_dataset.tf_counts.shape, dtype=torch.float32).to(device)
   with torch.no_grad():
@@ -290,7 +306,7 @@ for n in n_channel_list:
   all_pred = pred.cpu().numpy().copy()
   assert np.allclose(all_pred.sum(axis=-1), 1)
           
-  for i, tf in enumerate(TF_LIST): # loop over the four TFs
+  for i, tf in enumerate(conf_dict["tf_list"]): # loop over the four TFs
       pred_tf = all_pred[:, i, :, :]
       counts_tf = true_counts[:, i, :, :]
       labels, predictions, random = binary_labels_from_counts(counts_tf, pred_tf)
@@ -302,7 +318,7 @@ for n in n_channel_list:
 
 ```{python}
 df = pd.DataFrame(save_scores)
-df.to_csv("/home/philipp/BPNet/out/conv_channel_auprc.csv")
+df.to_csv(STATS_DIR / "conv_channel_auprc.csv")
 sns.scatterplot(data=df, x="n_channels", y="auprc", hue="tf", palette=color_pal)
 plt.show()
 ```
@@ -316,16 +332,16 @@ kernel_sizes = np.array([5, 9, 13, 17, 21, 25, 29, 33, 37])
 
 if retrain_kern_size:
   for kern_size in kernel_sizes:
-    model = BPNet(n_dil_layers=9, TF_list=TF_LIST, pred_total=False, bias_track=True, conv_channels=64, size_first_kernel=kern_size).to(device)
+    model = BPNet(n_dil_layers=9, TF_list=conf_dict["tf_list"], pred_total=False, bias_track=True, conv_channels=64, size_first_kernel=kern_size).to(device)
     optimizer = optim.Adam(model.parameters(), lr=4*1e-4)
 
-    train_loader=DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=True)
-    tune_loader=DataLoader(tune_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
+    train_loader=DataLoader(train_dataset, batch_size=conf_dict["batch_size"], shuffle=True, num_workers=0, pin_memory=True)
+    tune_loader=DataLoader(tune_dataset, batch_size=conf_dict["batch_size"], shuffle=False, num_workers=0, pin_memory=True)
 
     train_loss, test_loss = [], []
     patience_counter = 0
 
-    for epoch in range(MAX_EPOCHS):
+    for epoch in range(conf_dict["max_epochs"]):
       model.train()
       train_loss_epoch = []
       for one_hot, tf_counts, ctrl_counts, ctrl_smooth in train_loader:
@@ -354,10 +370,10 @@ if retrain_kern_size:
         patience_counter = 0
         best_state_dict = model.state_dict()
 
-      if patience_counter == EARLY_STOP_PATIENCE:
+      if patience_counter == conf_dict["early_stop_patience"]:
         break
     
-    if RESTORE_BEST_WEIGHTS:
+    if conf_dict["restore_best_weights"]:
       model.load_state_dict(best_state_dict)
 
     # plot train and test loss
@@ -369,7 +385,7 @@ if retrain_kern_size:
     plt.show()
 
     # save the model
-    torch.save(obj=model, f=f"/home/philipp/BPNet/trained_models/{kern_size}_first_kern_size_model.pt")
+    torch.save(obj=model, f=MODELS_DIR / f"{kern_size}_first_kern_size_model.pt")
 ```
 
 ## Evaluation
@@ -377,7 +393,7 @@ if retrain_kern_size:
 ```{python}
 test_dataset = ChIP_Nexus_Dataset(set_name="test", 
                                   input_dir=PRC_DIR, 
-                                  TF_list=TF_LIST)
+                                  TF_list=conf_dict["tf_list"])
 test_dataset
 ```
 
@@ -386,7 +402,7 @@ save_scores = []
 test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
 true_counts = test_dataset.tf_counts.copy()
 for n in kernel_sizes:
-  model = torch.load(f"/home/philipp/BPNet/trained_models/{n}_first_kern_size_model.pt")
+  model = torch.load(MODELS_DIR / f"{n}_first_kern_size_model.pt")
   # make predictions
   pred = torch.zeros(test_dataset.tf_counts.shape, dtype=torch.float32).to(device)
   with torch.no_grad():
@@ -398,7 +414,7 @@ for n in kernel_sizes:
   all_pred = pred.cpu().numpy().copy()
   assert np.allclose(all_pred.sum(axis=-1), 1)
           
-  for i, tf in enumerate(TF_LIST): # loop over the four TFs
+  for i, tf in enumerate(conf_dict["tf_list"]): # loop over the four TFs
       pred_tf = all_pred[:, i, :, :]
       counts_tf = true_counts[:, i, :, :]
       labels, predictions, random = binary_labels_from_counts(counts_tf, pred_tf)
@@ -410,7 +426,7 @@ for n in kernel_sizes:
 
 ```{python}
 df = pd.DataFrame(save_scores)
-df.to_csv("/home/philipp/BPNet/out/first_kern_size_auprc.csv")
+df.to_csv(STATS_DIR / "first_kern_size_auprc.csv")
 sns.scatterplot(data=df, x="first_kern_size", y="auprc", hue="tf", palette=color_pal)
 plt.show()
 ```

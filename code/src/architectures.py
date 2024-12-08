@@ -11,7 +11,7 @@ class ConvLayers(nn.Module):
         self.conv_layers.append(nn.Conv1d(in_channels=4, 
                                           out_channels=out_channels, 
                                           kernel_size=size_first_kernel,
-                                          padding = "same", 
+                                          padding = "same",  # (kernel_size - 1) // 2, e.g. 24 // 2 = 12
                                           padding_mode="zeros"))
         
         for i in range(1, n_dil_layers+1):
@@ -63,6 +63,7 @@ class ProfileShapeHead(nn.Module):
             bias = self.bias_weights[0] * bias_raw + self.bias_weights[1] * bias_smooth
             return prediction + bias
         return prediction
+
 
 class BPNet(nn.Module):
     def __init__(self, n_dil_layers, TF_list, conv_channels=64, pred_total=True, bias_track=True, size_first_kernel=25, size_dil_kernel=3):
