@@ -56,7 +56,7 @@ STATS_DIR.mkdir(exist_ok=True, parents=True)
 MODELS_DIR = Path("..") / "trained_models"
 MODELS_DIR.mkdir(exist_ok=True, parents=True)
 
-#retrain_conv_layers = True
+retrain_conv_layers = True
 retrain_channel = True
 retrain_kern_size = True
 ```

@@ -2,7 +2,7 @@
 <html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
 
 <meta charset="utf-8">
-<meta name="generator" content="quarto-1.5.45">
+<meta name="generator" content="quarto-1.6.39">
 
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
 
@@ -69,10 +69,10 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <script src="../site_libs/quarto-html/tippy.umd.min.js"></script>
 <script src="../site_libs/quarto-html/anchor.min.js"></script>
 <link href="../site_libs/quarto-html/tippy.css" rel="stylesheet">
-<link href="../site_libs/quarto-html/quarto-syntax-highlighting-dark.css" rel="stylesheet" id="quarto-text-highlighting-styles">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-dark-d166b450ba5a8e9f7a0ab969bf6592c1.css" rel="stylesheet" id="quarto-text-highlighting-styles">
 <script src="../site_libs/bootstrap/bootstrap.min.js"></script>
 <link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
-<link href="../site_libs/bootstrap/bootstrap.min.css" rel="stylesheet" id="quarto-bootstrap" data-mode="dark">
+<link href="../site_libs/bootstrap/bootstrap-4dc3fba39d20cba924e5db3bb4a81293.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="dark">
 <script id="quarto-search-options" type="application/json">{
   "location": "navbar",
   "copy-button": false,
@@ -214,7 +214,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <ul>
 <li>We can downlaod the data from <a href="https://zenodo.org/records/3371216">https://zenodo.org/records/3371216</a></li>
 </ul>
-<div id="6bde57d1" class="cell" data-execution_count="1">
+<div id="5432f5e6" class="cell" data-execution_count="1">
 <details class="code-fold">
 <summary>Code</summary>
 <div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> requests</span>
@@ -254,27 +254,14 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <pre><code>Data directory already exists at ../data.</code></pre>
 </div>
 <div class="cell-output cell-output-display" data-execution_count="1">
-<pre><code>[PosixPath('../data/mm10.blacklist.bed.gz'),
- PosixPath('../data/mm10.filtered.info'),
- PosixPath('../data/.DS_Store'),
- PosixPath('../data/intersected_set'),
- PosixPath('../data/mm10_no_alt_analysis_set_ENCODE.fasta.fai'),
- PosixPath('../data/mm10.fa.gz'),
- PosixPath('../data/fastas'),
- PosixPath('../data/chip-seq'),
- PosixPath('../data/mm10.blacklist.bed'),
- PosixPath('../data/merged_set'),
- PosixPath('../data/.gitignore'),
- PosixPath('../data/chip-nexus'),
- PosixPath('../data/mm10_no_alt_analysis_set_ENCODE.fasta'),
- PosixPath('../data/mm10.chrom.sizes')]</code></pre>
+<pre><code>[PosixPath('../data/mm10.fa.gz'), PosixPath('../data/data')]</code></pre>
 </div>
 </div>
 <ul>
 <li><p>Since the data directory is quite large we will delete the files we don’t need.</p></li>
 <li><p>Furthermore we download the <code>mm10.fa</code> file</p></li>
 </ul>
-<div id="f0042ef6" class="cell" data-execution_count="2">
+<div id="a5b7103e" class="cell" data-execution_count="2">
 <details class="code-fold">
 <summary>Code</summary>
 <div class="sourceCode cell-code" id="cb4"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a>mm10_file <span class="op">=</span> data_directory <span class="op">/</span> <span class="st">"mm10.fa.gz"</span></span>
@@ -386,8 +373,6 @@ window.document.addEventListener("DOMContentLoaded", function (event) {
   });
   clipboard.on('success', onCopySuccess);
   if (window.document.getElementById('quarto-embedded-source-code-modal')) {
-    // For code content inside modals, clipBoardJS needs to be initialized with a container option
-    // TODO: Check when it could be a function (https://github.com/zenorocha/clipboard.js/issues/860)
     const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
       text: getTextToCopy,
       container: window.document.getElementById('quarto-embedded-source-code-modal')
@@ -549,7 +534,6 @@ window.document.addEventListener("DOMContentLoaded", function (event) {
       if (window.Quarto?.typesetMath) {
         window.Quarto.typesetMath(note);
       }
-      // TODO in 1.5, we should make sure this works without a callout special case
       if (note.classList.contains("callout")) {
         return note.outerHTML;
       } else {

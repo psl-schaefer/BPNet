@@ -37,6 +37,7 @@ suppressPackageStartupMessages({
   library(TFBSTools)
   library(plyranges)
 })
+reticulate::use_condaenv("py-env-bpnet")
 # Setup Multiprocessing
 options(future.globals.maxSize=5000*1024^2)
 future::plan(future::multisession, workers = 4)

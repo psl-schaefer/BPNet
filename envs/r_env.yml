@@ -8,6 +8,7 @@ dependencies:
   - r-reticulate
   - r-tidyverse
   - r-furrr
+  - r-ggdark
   - python
   - bioconductor-plyranges
   - bioconductor-rtracklayer
