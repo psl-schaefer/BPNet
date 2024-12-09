@@ -31,21 +31,21 @@ website:
       - icon: linkedin
         href: https://www.linkedin.com/in/philipp-sl-schaefer/
     left:
-      - href: 00_introduction.qmd
+      - href: code/00_introduction.qmd
         text: Introduction
-      - href: 01_download.qmd
+      - href: code/01_download.qmd
         text: Download
-      - href: 02_prepare_input.qmd
+      - href: code/02_prepare_input.qmd
         text: Processing
-      - href: 03_APIs.qmd
+      - href: code/03_APIs.qmd
         text: APIs
-      - href: 04_training.qmd
+      - href: code/04_training.qmd
         text: Training
-      - href: 05_architecture_comparison.qmd
+      - href: code/05_architecture_comparison.qmd
         text: Architectures
-      - href: 06_interpretability.qmd
+      - href: code/06_interpretability.qmd
         text: Interpretability
-      - href: 07_mutagenesis.qmd
+      - href: code/07_mutagenesis.qmd
         text: Mutagenesis
 
 format:
